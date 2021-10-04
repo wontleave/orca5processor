@@ -3,9 +3,10 @@ import struct
 import tempfile
 from os import path
 from ase import Atoms
+from ase.io import read
 import pathlib
 
-
+# TODO If no OPT is in the job_type but there is FREQ, check the engrad to ensure that the structure is a min
 # Classes related to Detailed Keywords
 class Method:
     def __init__(self, run_type=None, cpcm=None):
@@ -125,9 +126,9 @@ class Cpcm:
                     elif "Rsolv                                           ..." in line:
                         self.keywords["rsolv"] = float(line.split()[-1])
                     elif "Surface type                                    ..." in line:
-                        self.keywords["surfacetype"] = float(line.split("... ")[-1])
+                        self.keywords["surfacetype"] = line.split("... ")[-1].strip()
                     elif "Epsilon function type                           ..." in line:
-                        self.keywords["fepstype"] = float(line.split()[-1])
+                        self.keywords["fepstype"] =line.split()[-1].strip()
 
 
 class Geom:
@@ -289,11 +290,15 @@ class Freq:
 
             if start_to_read_freq and "cm**-1" in line:
                 try:
-                    _, frequency, _ = line.split()
-                    self.frequencies.append(float(frequency))
+                    temp = line.split()
+                    if len(temp) == 3:
+                        self.frequencies.append(float(temp[-2]))
+                    elif len(temp) == 5:
+                        self.frequencies.append(float(temp[-3]))
                 except ValueError:
                     start_to_read_freq = False
                     freq_read = True
+
             elif start_to_read_thermo:
                 if "Temperature         ..." in line:
                     try:
@@ -413,7 +418,7 @@ class Orca5:
 
         # Get the root name of the orca_out_file
         self.root_name = None
-
+        self.root_path = path.dirname(orca_out_file)
         self.property_path = property_path  # Extension is .txt. NOT USED FOR NOW 20210930
         self.engrad_path = engrad_path  # Extension is .engrad
         self.output_path = orca_out_file  # Extension can be .out, .coronab, .wml01, .lic001
@@ -428,6 +433,7 @@ class Orca5:
         self.job_type_objs = {}
         self.method = None  # All job type must have a Method object
         self.basis = None  # All job type must have a Basis object
+        self.molecule = None  # All properties are derived from this structure.
         # an incomplete/unsupported job is assumed
 
         # Only property file -> single point, spectroscopic properties? Elec energy here doesn't include SRM
@@ -440,6 +446,9 @@ class Orca5:
         # keywords used in the Orca 5 calculation
         self.keywords, self.coord_spec, self.input_name = \
             get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
+
+        if self.coord_spec["coord_type"] == "xyzfile":
+            self.molecule = read(path.join(self.root_path, self.coord_spec["coord_path"]))
 
         self.root_name, _ = path.splitext(self.input_name)
         self.determine_jobtype()
@@ -513,7 +522,8 @@ class Orca5:
                 self.job_types.append("CPCM")
                 solvent = req_kw.string.split("(")[-1].strip(")")
                 sanity_check += 1
-        assert sanity_check == 1, f"You have more than one CPCM simple keyword in the ORCA5 input"
+        assert sanity_check <= 1, f"You have {sanity_check} CPCM simple keyword in the ORCA5 input: "
+
         # Check if it is a single point
         if len(self.job_types) == 0:
             is_single_point = False
@@ -533,63 +543,70 @@ class Orca5:
 
         # Create or copy the required job_type objs
         if self.job_types is not None:
+
+            # All job type will contain a method, basis and Scf object
+            if "METHOD" not in self.keywords.keys():
+                self.keywords["method"] = Method()
+                self.method = self.keywords["method"]
+
             if "basis" not in self.keywords.keys():
                 self.basis = Basis()
                 self.basis.process_simple_keywords(self.keywords["simple"])
 
+            if "SP" not in self.job_types:
+                self.job_types.append("SP")
+            if "SCF" not in self.keywords.keys():
+                self.job_type_objs["SP"] = Scf()
+            else:
+                self.job_type_objs["SP"] = self.keywords["SCF"]
+
+            for kw in scf_conv_simple_keywords:
+                if kw.upper() in self.keywords["simple"]:
+                    self.job_type_objs["SP"].keywords["convergence"] = kw
+
+            for kw in dft_simple_keywords:
+                if kw.upper() in self.keywords["simple"]:
+                    self.method.keywords["functional"] = kw
+                    self.method.keywords["method"] = "dft"
+
+            # Other job types are specified here
             for item in self.job_types:
+                # Detailed keywords used in ORCA 5 % ... end are in lowercase! e.g. self.method.keywords["runtyp"]
+                # each key in self.keywords is in uppercase. Each of them correspond to an object in self.job_type_objs
                 if item == "SP":
-                    if "method" not in self.keywords.keys():
-                        self.method = Method(run_type="SP")
-                    else:
-                        self.method = self.keywords["method"]
-                        self.method.keywords["runtyp"] = "SP"
-
-                    if "scf" not in self.keywords.keys():
-                        self.job_type_objs["SP"] = Scf()
-                    else:
-                        self.job_type_objs["SP"] = self.keywords["scf"]
-
-                    for kw in scf_conv_simple_keywords:
-                        if kw.upper() in self.keywords["simple"]:
-                            self.job_type_objs["SP"].keywords["convergence"] = kw
-
-                    for kw in dft_simple_keywords:
-                        if kw.upper() in self.keywords["simple"]:
-                            self.method.keywords["functional"] = kw
-                            self.method.keywords["method"] = "dft"
+                    self.method = self.keywords["method"]
+                    self.method.keywords["runtyp"] = "SP"
 
                 elif item == "OPT":
-                    if "method" not in self.keywords.keys():
-                        self.method = Method(run_type="OPT")
-                    else:
-                        self.method = self.keywords["method"]
-                        self.method.keywords["runtyp"] = "OPT"
+                    self.method = self.keywords["method"]
+                    self.method.keywords["runtyp"] = "OPT"
 
-                    if "geom" not in self.keywords.keys():
+                    if "GEOM" not in self.keywords.keys():
                         self.job_type_objs["OPT"] = Geom()
                     else:
-                        self.job_type_objs["OPT"] = self.keywords["geom"]
+                        self.job_type_objs["OPT"] = self.keywords["GEOM"]
 
                 elif item in ('FREQ', "ANFREQ", "NUMFREQ"):
-                    if "freq" not in self.keywords.keys():
-                        self.keywords["freq"] = Freq()
+                    if "OPT" not in self.job_types:
+                        self.method = self.keywords["method"]
+                        self.method.keywords["runtyp"] = "FREQ"
+
+                    if "FREQ" not in self.keywords.keys():
+                        self.keywords["FREQ"] = Freq()
                         if item == "ANFREQ":
-                            self.keywords["freq"].keywords["anfreq"] = True
+                            self.keywords["FREQ"].keywords["anfreq"] = True
                         elif item == "NUMFREQ":
-                            self.keywords["freq"].keywords["numfreq"] = True
-                        self.job_type_objs["FREQ"] = self.keywords["freq"]
+                            self.keywords["FREQ"].keywords["numfreq"] = True
+                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
                     else:
-                        self.job_type_objs["FREQ"] = self.keywords["freq"]
+                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
 
                 elif item == "CPCM":
-                    if "cpcm" not in self.keywords.keys():
+                    if "CPCM" not in self.keywords.keys():
                         self.keywords["CPCM"] = Cpcm(solvent)
+                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
 
-                    if "method" not in self.keywords.keys():
-                        self.method = Method(cpcm=self.keywords["cpcm"])
-                    else:
-                        self.method.cpcm =  self.keywords["cpcm"]
+                    self.method.cpcm = self.keywords["CPCM"]
 
 
 
@@ -682,16 +699,16 @@ def get_orca5_keywords(lines_):
             start_to_read_simple_kw = False
             if current_detailed_kw is None:
                 current_detailed_kw = item.strip("%").lower()
-                if current_detailed_kw == "method":
-                    keywords["method"] = Method()
-                elif current_detailed_kw == "geom":
-                    keywords["geom"] = Geom()
-                elif current_detailed_kw == "mtr":
-                    keywords["mtr"] = Mtr()
-                elif current_detailed_kw == "freq":
-                    keywords["freq"] = Freq()
-                elif current_detailed_kw == "scf":
-                    keywords["scf"] = Scf()
+                if current_detailed_kw == "METHOD":
+                    keywords[current_detailed_kw.upper()] = Method()
+                elif current_detailed_kw == "GEOM":
+                    keywords[current_detailed_kw.upper()] = Geom()
+                elif current_detailed_kw == "MTR":
+                    keywords[current_detailed_kw.upper()] = Mtr()
+                elif current_detailed_kw == "FREQ":
+                    keywords[current_detailed_kw.upper()] = Freq()
+                elif current_detailed_kw == "SCF":
+                    keywords[current_detailed_kw.upper()] = Scf()
                 else:
                     current_detailed_kw = None
         elif start_to_read_simple_kw:
@@ -723,9 +740,12 @@ def get_orca5_keywords(lines_):
         elif "*" in item:  # * marks the beginning of coordinates specfification
             coord_type = flatten_lines[idx + 1]
             multiplicity = int(flatten_lines[idx + 2])
-            charge = int(flatten_lines[idx + 2])
-            coord_path = flatten_lines[idx + 3]
-            idx_to_exclude = [idx + 1, idx + 2, idx + 3]
+            charge = int(flatten_lines[idx + 3])
+            if coord_type == "xyzfile":
+                coord_path = flatten_lines[idx + 4]
+            else:
+                coord_path = None
+            idx_to_exclude = [idx + 1, idx + 2, idx + 3, idx + 4]
 
     # Change all simple keywords to lowercase
     keywords["simple"] = [item.upper() for item in keywords["simple"]]

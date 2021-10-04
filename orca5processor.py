@@ -28,8 +28,8 @@ class Orca5Processor:
                                 "wlm01" in file or
                                 "coronab" in file or
                                 "lic01" in file or
-                                "hpc-mn1" in file or
-                                "out" in file]  # these are the supported extension
+                                "hpc-mn1" in file
+                                ]  # these are the supported extension
 
             # Each valid output file should correspond to an Orca 5 calculation.
             # Multiple output files can be present in a folder. For instance. OptTS + NumHess + multiple single point
@@ -42,5 +42,6 @@ class Orca5Processor:
 
 
 if __name__ == "__main__":
-    root_ = r"E:\TEST\SP_tests"
+    root_ = r"E:\TEST\SP_tests\TS_R"
     orca5_ojbs = Orca5Processor(root_)
+    print()
