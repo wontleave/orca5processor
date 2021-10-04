@@ -42,5 +42,5 @@ class Orca5Processor:
 
 
 if __name__ == "__main__":
-    root_ = r"E:\TEST\SP_tests\wB97X-V_TZ-ALPB_GFN2"
+    root_ = r"E:\TEST\SP_tests"
     orca5_ojbs = Orca5Processor(root_)
