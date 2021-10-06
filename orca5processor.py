@@ -1,5 +1,8 @@
 import numpy as np
+import pandas as pd
 import time
+from typing import Dict, List
+from orca5_utils import calc_rmsd_ase_atoms_non_pbs
 from reading_utilis import read_root_folders
 from orca5_utils import Orca5
 from os import listdir, path
@@ -56,15 +59,21 @@ class Orca5Processor:
 
         if post_process_type.lower() == "stationary":
             # Check if all the folders have the same number of orca5 object
-            # All SP structures must be consistent with the FREQ or OPT structure
-            ref_objs = {}  # The key is the root folder, the value is the OPT job_type_obj (only 1)
+            ref_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
             for key in self.folders_to_orca5:
                 ref_objs[key] = []
                 no_of_opt = 0
                 temp_obj_lists_ = self.folders_to_orca5[key]
                 for obj in temp_obj_lists_:
                     if "OPT" in obj.job_type_objs:
-                        ref_objs[key].append(obj)
+                        if len(ref_objs[key]) == 1:
+                            # Check if the OPT object structure is the same as the current one
+                            rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                            if rmsd_ > 1e-5:
+                                ref_objs[key].append(obj)
+                        elif len(ref_objs[key]) > 1:
+                            ref_objs[key].append(obj)
+
                     elif "FREQ" in obj.job_type_objs:
                         if obj.job_type_objs["FREQ"].neligible_gradient:
                             ref_objs[key].append(obj)
@@ -77,10 +86,32 @@ class Orca5Processor:
                                 print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
                             else:
                                 print(f"Loosen cut-off from {orig_cut_off:.2E} to {loosen_cut_off:.2E}"
-                                      f" - successful - Adding {obj}")
+                                      f" - successful - Adding {obj.input_name}")
                                 ref_objs[key].append(obj)
 
                 assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
+
+            # All SP structures must be consistent with the structure in the reference obj
+            sp_objs: Dict[str, List[Orca5]] = {}
+            for key in self.folders_to_orca5:
+                sp_objs[key] = []
+                temp_obj_lists_ = self.folders_to_orca5[key]
+                for obj in temp_obj_lists_:
+                    if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
+                        # TODO We will assume that this is a SP for now
+                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                        if rmsd_ < 5e-6:
+                            sp_objs[key].append(obj)
+
+            # Collect the self.labelled_data and make the pandas df
+            labeled_data: Dict[str, List[Dict[str, str]]] = {}
+            for key in ref_objs:
+                labeled_data[key] = ref_objs[key][0].labelled_data
+                for obj_ in sp_objs[key]:
+                    labeled_data[key] += obj_.labelled_data
+
+            combined_df = pd.DataFrame(labeled_data)
+            combined_df.to_excel(path.join(root_folder_path, "stationary.xlsx"))
 
     def orca5_to_pd(self, orca5_objs):
         """

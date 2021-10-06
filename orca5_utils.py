@@ -1,7 +1,7 @@
 import re
 from rmsd import reorder_inertia_hungarian, rmsd
 from os import path
-
+from typing import Dict, List
 import numpy as np
 from ase import Atoms
 from ase.io import read
@@ -35,7 +35,7 @@ class Method:
         self.single_value_float = ("mayer_bondorderthres", "scalmp2c", "scalldac", "scalhfx")
         self.single_value_int = ()
         self.multi_values = ()  # Multi_values keywords required an "end" to terminate
-
+        self.is_qmmm = False
         self.cpcm = cpcm
 
 
@@ -417,7 +417,7 @@ class Scf:
         # Multi_values keywords required an "end" to terminate
         self.multi_values = ()
 
-        self.gradients_cut_off = 1e-6
+        self.gradients_cut_off = 1e-5
         self.gradients = None
         self.final_sp_energy = None
         self.geo_from_output = None
@@ -494,9 +494,10 @@ class Scf:
 class Qmmm:
     def __init__(self):
         self.name = "qmmm"
-        self.keywords = {"qmatoms:": None, "charge_total": 0, "multi_total": 1}
+        self.keywords = {"qmatoms:": None, "charge_total": 0, "multi_total": 1,
+                         "qm2custommethod": None, "qm2custombasis": None, "qm2customfile": None}
 
-        self.single_value_str = ()
+        self.single_value_str = ("qm2custommethod", "qm2custombasis", "qm2customfile")
         self.single_value_float = ()
         self.single_value_int = ("charge_total", "multi_total")
         # Multi_values keywords required an "end" to terminate
@@ -526,7 +527,7 @@ class Orca5:
         self.output_path = orca_out_file  # Extension can be .out, .coronab, .wml01, .lic001
         self.job_types = []  # If job_types is None after processing the given folder
         self.level_of_theory = None  # e.g CPCM(solvent)/B97-3c, CPCM(solvent)/wB97X-V/def2-TZVPP//PBEh-3c
-        self.labelled_data = []  # Used to create a pandas for writing to excel
+        self.labelled_data: List[Dict[str, str]] = [] # Used to create a pandas for writing to excel
         self.warnings = []
         # Each job type will have its own object
         # SP: Scf
@@ -536,7 +537,9 @@ class Orca5:
         # Freq: Scf + Freq
         # IRC: Scf + IRC
         self.job_type_objs = {}
+        self.method: Method
         self.method = None  # All job type must have a Method object
+        self.basis: Basis
         self.basis = None  # All job type must have a Basis object
         self.geo_from_output: Atoms
         self.geo_from_output = None  # All properties are derived from this structure.
@@ -558,9 +561,20 @@ class Orca5:
             get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
 
         if self.coord_spec["coord_type"] == "xyzfile":
+            found_xyzfile = False
             temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
-            assert Path(temp_path).is_file(), f"{temp_path} does not exist"
-            self.geo_from_xyz = read(temp_path)
+            from_root = None
+            if Path(temp_path).is_file():
+                found_xyzfile = True
+                self.geo_from_xyz = read(temp_path)
+            else:
+                from_root = path.join(self.root_path, self.input_name)
+                from_root = Path(from_root)
+                from_root = from_root.with_suffix(".xyz")
+                if from_root.is_file():
+                    self.geo_from_xyz = read(from_root.resolve())
+                    found_xyzfile = True
+            assert found_xyzfile, f"Sorry, we can't find {temp_path} or {from_root.resolve()}"
 
         self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
 
@@ -568,18 +582,8 @@ class Orca5:
         self.parse_orca5_output(lines[self.input_section["end"]:])
         self.get_level_of_theory()
         # compare the geometry from output and from xyzfile if necessary
-        if self.geo_from_xyz is not None:
-            elements_from_xyz = np.array(self.geo_from_xyz.get_chemical_symbols())
-            elements_from_output = np.array(self.geo_from_output.get_chemical_symbols())
-            coords_from_xyz = np.array(self.geo_from_xyz.get_positions())
-            coords_from_output = np.array(self.geo_from_output.get_positions())
-            assert coords_from_xyz.shape == coords_from_output.shape
-            q_review = reorder_inertia_hungarian(elements_from_xyz, elements_from_output,
-                                                 coords_from_xyz, coords_from_output)
-
-            coords_from_output = coords_from_output[q_review]
-            rmsd_ = rmsd(coords_from_xyz, coords_from_output)
-
+        if self.geo_from_xyz is not None and not self.method.is_qmmm:
+            rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
             if rmsd_ > 1e-5:
                 self.warnings.append(f"Difference between geometry from output and xyzfile. RMSD = {rmsd_}")
 
@@ -634,6 +638,9 @@ class Orca5:
 
             elif job_type == "CPCM":
                 self.job_type_objs["CPCM"].get_cpcm_details(lines_)
+            # TODO read QMMM details
+            # elif job_type == "QMMM":
+            #     print()
 
         if "OPT" not in self.job_types:
             if "FREQ" in self.job_types:
@@ -756,7 +763,7 @@ class Orca5:
                     self.method = self.keywords["method"]
                     self.method.keywords["runtyp"] = "OPT"
 
-                    if "GEOM" not in self.keywords.keys():
+                    if "GEOM" not in self.keywords:
                         self.job_type_objs["OPT"] = Geom()
                     else:
                         self.job_type_objs["OPT"] = self.keywords["GEOM"]
@@ -766,7 +773,7 @@ class Orca5:
                         self.method = self.keywords["method"]
                         self.method.keywords["runtyp"] = "FREQ"
 
-                    if "FREQ" not in self.keywords.keys():
+                    if "FREQ" not in self.keywords:
                         self.keywords["FREQ"] = Freq()
                         if item == "ANFREQ":
                             self.keywords["FREQ"].keywords["anfreq"] = True
@@ -777,11 +784,17 @@ class Orca5:
                         self.job_type_objs["FREQ"] = self.keywords["FREQ"]
 
                 elif item == "CPCM":
-                    if "CPCM" not in self.keywords.keys():
+                    if "CPCM" not in self.keywords:
                         self.keywords["CPCM"] = Cpcm(solvent)
                     self.job_type_objs["CPCM"] = self.keywords["CPCM"]
 
                     self.method.cpcm = self.keywords["CPCM"]
+
+                elif item == "QMMM":
+                    if "QMMM" not in self.keywords:
+                        self.keywords["QMMM"] = Qmmm()
+                    self.job_type_objs["QMMM"] = self.keywords["QMMM"]
+                    self.method.is_qmmm = True
 
     def get_level_of_theory(self):
         """
@@ -859,6 +872,8 @@ general_keywords = ("HF", "DFT", "FOD")
 dft_simple_keywords = ("PBEh-3c", "r2scan-3c", "B97-3c",
                        "B3LYP", "M06-2X", "wB97X-V", "wB97X-D4", "wB97M-V", "wB97M-D4")
 
+qmmm_simple_keywords = ("QM/XTB")
+
 # ORCA5 basis sets keywords
 basis_set_keywords = {"basis_set_keywords": ("def2-SVP", "def2-SV(P)", "def2-TZVP", "def2-TZVP(-f)",
                                              "def2-TZVPP", "def2-QZVP", "def2-QZVPP"),
@@ -878,6 +893,28 @@ grid_simple_keywords = ("GRID", "GRIDX", "NOFINALGRIDX", "NOFINALGRID")
 
 
 # Independent function collections
+def calc_rmsd_ase_atoms_non_pbs(atoms_p, atoms_q):
+    """
+    Compare two ASE Atoms object and calculate its rmsd
+    :param atoms_p:
+    :type atoms_p: Atoms
+    :param atoms_q:
+    :type atoms_q: Atoms
+    :return:
+    :rtype:
+    """
+    p_elements = np.array(atoms_p.get_chemical_symbols())
+    q_elements = np.array(atoms_q.get_chemical_symbols())
+    p_coords = np.array(atoms_p.get_positions())
+    q_coords = np.array(atoms_q.get_positions())
+    assert p_coords.shape == q_coords.shape, f"Sorry, no point comparing two molecules of different number of atoms. " \
+                                             f"atoms_p:{p_coords.shape} and atoms_q:{q_coords.shape}"
+
+    q_review = reorder_inertia_hungarian(p_elements, q_elements, p_coords, q_coords)
+    q_coords = q_coords[q_review]
+    return rmsd(p_coords, q_coords)
+
+
 def get_orca5_keywords(lines_):
     """
     Parse the INPUT FILES section of an Orca 5 output to get all the simple and detailed keywords which determine
@@ -967,7 +1004,7 @@ def get_orca5_keywords(lines_):
                         idx_to_exclude.append(value_idx)
                     current_detailed_kw = None
         elif "NAME" in item:
-            name = flatten_lines[idx + 1]
+            name = flatten_lines[idx + 1].strip()
             idx_to_exclude = [idx + 1]
         elif "*" in item:  # * marks the beginning of coordinates specfification
             coord_type = flatten_lines[idx + 1]
@@ -981,5 +1018,8 @@ def get_orca5_keywords(lines_):
 
     # Change all simple keywords to lowercase
     keywords["simple"] = [item.upper() for item in keywords["simple"]]
-    return keywords, {"coord_type": coord_type, "coord_path": coord_path,
-                      "multiplicity": multiplicity, "charge": charge}, name
+
+    # basename accounts for the relative path used in Singularity container
+    return keywords, {"coord_type": coord_type, "coord_path": path.basename(coord_path),
+                      "multiplicity": multiplicity, "charge": charge}, path.basename(name)
+
