@@ -1,13 +1,17 @@
 import re
-import struct
-import tempfile
+from rmsd import reorder_inertia_hungarian, rmsd
 from os import path
+
+import numpy as np
 from ase import Atoms
 from ase.io import read
-import pathlib
+from pathlib import Path
+
 
 # TODO If no OPT is in the job_type but there is FREQ, check the engrad to ensure that the structure is a min
 # Classes related to Detailed Keywords
+
+
 class Method:
     def __init__(self, run_type=None, cpcm=None):
         """
@@ -21,11 +25,11 @@ class Method:
         self.name = "method"
         self.keywords = {"runtyp": run_type,
                          "functional": None, "exchange": None, "correlation": None,
-                         "scalmp2c": None, "scalldac": None,"scalhfx": None,
+                         "scalmp2c": None, "scalldac": None, "scalhfx": None,
                          "method": None,
                          "mayer_bondorderthres": None,
                          "ri": None
-                        }
+                         }
 
         self.single_value_str = ("exchange", "correlation", "runtyp", "functional", "method", "ri")
         self.single_value_float = ("mayer_bondorderthres", "scalmp2c", "scalldac", "scalhfx")
@@ -96,8 +100,8 @@ class Cpcm:
         self.keywords = {"epsilon": None, "refrac": None, "rsolv": None, "rmin": None, "pmin": None,
                          "surfacetype": None, "fepstype": None, "xfeps": None,
                          "ndiv": None, "num_leb": None,
-                         "smd": None, "smdsolvent": None
-                        }
+                         "smd": "False", "smdsolvent": None
+                         }
 
         self.single_value_str = ("surfacetype", "fepstype", "smd", "smdsolvent")
         self.single_value_float = ("epsilon", "refrac", "rmin", "pmin", "rsolv", "xfeps")
@@ -128,7 +132,7 @@ class Cpcm:
                     elif "Surface type                                    ..." in line:
                         self.keywords["surfacetype"] = line.split("... ")[-1].strip()
                     elif "Epsilon function type                           ..." in line:
-                        self.keywords["fepstype"] =line.split()[-1].strip()
+                        self.keywords["fepstype"] = line.split()[-1].strip()
 
 
 class Geom:
@@ -153,8 +157,8 @@ class Geom:
         self.multi_values = ("scan", "modify_internals", "constraints")
 
         # ASE Atoms object of the optimized geometry. Both has to be equal
-        self.opt_geo_from_output = None
-        self.opt_geo_from_xyz = None
+        self.geo_from_output = None
+        self.geo_from_xyz = None
 
     def get_opt_geo(self, lines_):
         """
@@ -200,12 +204,12 @@ class Geom:
             if "CARTESIAN COORDINATES (ANGSTROEM)" in line and start_to_read_xyz:
                 start_to_read_xyz += 1
 
-        self.opt_geo_from_output = Atoms(elements_seq, positions=cart_coords)
+        self.geo_from_output = Atoms(elements_seq, positions=cart_coords)
 
 
 class Mtr:
     def __init__(self):
-        self.name ="mtr"
+        self.name = "mtr"
         self.keywords = {"hessname": None,
                          "modetype": None,
                          "mlist": [],
@@ -223,18 +227,18 @@ class Mtr:
 class Freq:
     def __init__(self):
         self.name = "freq"
-        self.keywords ={"temp": None,
-                        "t": [],
-                        "numfreq": None,
-                        "anfreq": None,
-                        "scalfreq": 1.0,
-                        "centradiff": None,
-                        "restart": None,
-                        "dx": None,
-                        "increment": None,
-                        "hybrid_hess": [],
-                        "quasirrho": None,
-                        "cutoffreq": None}
+        self.keywords = {"temp": None,
+                         "t": [],
+                         "numfreq": None,
+                         "anfreq": None,
+                         "scalfreq": 1.0,
+                         "centradiff": None,
+                         "restart": None,
+                         "dx": None,
+                         "increment": None,
+                         "hybrid_hess": [],
+                         "quasirrho": None,
+                         "cutoffreq": None}
 
         self.single_value_str = ("numfreq", "anfreq", "centradiff", "restart")
         self.single_value_float = ("temp", "scalfreq", "dx", "increment", "cutoffreq", "quasirrho")
@@ -255,6 +259,10 @@ class Freq:
         self.total_enthalpy = None
         self.final_entropy_term = None
         self.final_gibbs_free_energy = None
+        # If an OPT object is not present but the gradient is less than 5e-6 we consider this frequency to be part of
+        # a converged geometry optimization
+        self.neligible_gradient = False
+        self.geo_from_output = None
 
     def get_thermochemistry(self, lines_, with_opt=False):
         """
@@ -272,10 +280,18 @@ class Freq:
         start_to_read_thermo = False
         freq_read = False
 
+        # 1: found the line "CARTESIAN COORDINATES (ANGSTROEM)"
+        # 2: found the ilne : ------------------
+        start_geometry_from_single_point = 0
+
+        elements_seq = ""
+        coordinates = []
+
         if with_opt:
             successful_opt = False
         else:
             successful_opt = True
+            geometry_from_single_point = True
 
         for line in lines_:
             if "THE OPTIMIZATION HAS CONVERGED" in line:
@@ -287,6 +303,8 @@ class Freq:
             if "THERMOCHEMISTRY AT" in line and successful_opt:
                 start_to_read_thermo = True
                 continue
+            if "CARTESIAN COORDINATES (ANGSTROEM)" in line:
+                start_geometry_from_single_point += 1
 
             if start_to_read_freq and "cm**-1" in line:
                 try:
@@ -362,6 +380,20 @@ class Freq:
                         raise ValueError(f"{line} -- does not contain the final Gibbs free energy"
                                          f" at the expected index")
 
+            elif start_geometry_from_single_point:
+                if start_geometry_from_single_point == 1 and "---------------------------------" in line:
+                    start_geometry_from_single_point += 1
+                    continue
+                elif start_geometry_from_single_point == 2:
+                    try:
+                        element, x, y, z = line.split()
+                        elements_seq += element
+                        coordinates.append([float(x), float(y), float(z)])
+                    except ValueError:
+                        start_geometry_from_single_point = 0
+                        self.geo_from_output = Atoms(elements_seq, positions=np.array(coordinates))
+                        continue
+
 
 class Scf:
     def __init__(self):
@@ -371,21 +403,24 @@ class Scf:
         Final single point energy in a SP. Final single point of the optimized structure in OPT and OPTTS.
 
         """
-        self.name ="scf"
+        self.name = "scf"
         self.keywords = {"convergence": None,
                          "autotrah": None,
                          "stabperform": None,
                          "tole": None,
                          "tolg": None,
                          "sthresh": 1E-8}
-        self.all_keys = [key.lower() for key in self.keywords.keys()]
+
         self.single_value_str = ("convergence", "autotrah", "stabperform")
         self.single_value_float = ("tole", "tolg", "sthresh")
         self.single_value_int = ()
         # Multi_values keywords required an "end" to terminate
         self.multi_values = ()
 
+        self.gradients_cut_off = 1e-6
+        self.gradients = None
         self.final_sp_energy = None
+        self.geo_from_output = None
 
     def get_final_sp_energy(self, lines):
         """
@@ -393,16 +428,82 @@ class Scf:
         :return:
         :rtype:
         """
-        final_sp_expr = re.compile("FINAL SINGLE POINT ENERGY")
+        start_geometry_from_single_point = 0
+        elements_seq = ""
+        coordinates = []
+
         for line in lines:
+            if "CARTESIAN COORDINATES (ANGSTROEM)" in line:
+                start_geometry_from_single_point += 1
+
             if "FINAL SINGLE POINT ENERGY" in line:
                 try:
                     self.final_sp_energy = float(line.split()[-1])
                 except ValueError:
                     raise ValueError(f"Cannot cast {line.split()[-1]} as a float ! check your output!")
+            elif start_geometry_from_single_point:
+                if start_geometry_from_single_point == 1 and "---------------------------------" in line:
+                    start_geometry_from_single_point += 1
+                    continue
+                elif start_geometry_from_single_point == 2:
+                    try:
+                        element, x, y, z = line.split()
+                        elements_seq += element
+                        coordinates.append([float(x), float(y), float(z)])
+                    except ValueError:
+                        start_geometry_from_single_point = 0
+                        self.geo_from_output = Atoms(elements_seq, positions=np.array(coordinates))
+                        continue
+
+    def read_gradient(self, path_to_engrad):
+        """
+        Start to read based on the number of #: we expect 8
+
+        :param path_to_engrad: the full path to the engrad file
+        :type path_to_engrad: str
+        :return: None
+        :rtype: None
+        """
+        with open(path_to_engrad, "r") as f:
+            lines_ = f.readlines()
+
+        start_to_read = 8
+        coords_count = 0
+        n_atoms = 0
+        n_cart_forces = 0
+        gradients = None
+        for line in lines_:
+            if start_to_read == -2 and coords_count < n_cart_forces:
+                gradients[coords_count] = float(line)
+                coords_count += 1
+            elif start_to_read == 5:
+                n_atoms = int(line)
+                n_cart_forces = 3 * n_atoms
+                assert gradients is None, "There is something wrong with your engrad file!!! Gradient is " \
+                                          "initialized more than once"
+                gradients = np.zeros(n_cart_forces)
+                start_to_read -= 1
+            elif start_to_read == -3:
+                self.gradients = gradients.reshape(-1, 3)
+                break
+
+            if "#" in line:
+                start_to_read -= 1
 
 
+class Qmmm:
+    def __init__(self):
+        self.name = "qmmm"
+        self.keywords = {"qmatoms:": None, "charge_total": 0, "multi_total": 1}
+
+        self.single_value_str = ()
+        self.single_value_float = ()
+        self.single_value_int = ("charge_total", "multi_total")
+        # Multi_values keywords required an "end" to terminate
+        self.multi_values = ("qmatoms")
 # END of classes related to detailed keyword
+
+
 class Orca5:
     """
     Read a folder that contains data generated from Orca 5.0 and create the relevant ASE objects
@@ -410,6 +511,7 @@ class Orca5:
     Molecules are created as ASE Atoms object
     !!!Maybe compatible with ORCA 4, but use at your own risk
     """
+
     def __init__(self, orca_out_file,
                  property_path=None,
                  engrad_path=None,
@@ -423,6 +525,9 @@ class Orca5:
         self.engrad_path = engrad_path  # Extension is .engrad
         self.output_path = orca_out_file  # Extension can be .out, .coronab, .wml01, .lic001
         self.job_types = []  # If job_types is None after processing the given folder
+        self.level_of_theory = None  # e.g CPCM(solvent)/B97-3c, CPCM(solvent)/wB97X-V/def2-TZVPP//PBEh-3c
+        self.labelled_data = []  # Used to create a pandas for writing to excel
+        self.warnings = []
         # Each job type will have its own object
         # SP: Scf
         # ENGRAD: Scf
@@ -433,7 +538,10 @@ class Orca5:
         self.job_type_objs = {}
         self.method = None  # All job type must have a Method object
         self.basis = None  # All job type must have a Basis object
-        self.molecule = None  # All properties are derived from this structure.
+        self.geo_from_output: Atoms
+        self.geo_from_output = None  # All properties are derived from this structure.
+        self.geo_from_xyz: Atoms
+        self.geo_from_xyz = None  # The actual xyzfile used for the Orca 5 calculation
         # an incomplete/unsupported job is assumed
 
         # Only property file -> single point, spectroscopic properties? Elec energy here doesn't include SRM
@@ -443,16 +551,37 @@ class Orca5:
         self.input_section = {"start": 0, "end": 0}
         self.find_input_sections(lines)
 
-        # keywords used in the Orca 5 calculation
+        # keywords used in the Orca 5 calculation are stored in <<self.keywords>>
+        # self.coord_spec is a dict that contains - "coord_type": xyz, xyzfile - "coord_path" - "charge" - "multiplicity
+        # self.input_name is obtained from the input section "NAME = .... "
         self.keywords, self.coord_spec, self.input_name = \
             get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
 
         if self.coord_spec["coord_type"] == "xyzfile":
-            self.molecule = read(path.join(self.root_path, self.coord_spec["coord_path"]))
+            temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
+            assert Path(temp_path).is_file(), f"{temp_path} does not exist"
+            self.geo_from_xyz = read(temp_path)
 
-        self.root_name, _ = path.splitext(self.input_name)
+        self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
+
         self.determine_jobtype()
         self.parse_orca5_output(lines[self.input_section["end"]:])
+        self.get_level_of_theory()
+        # compare the geometry from output and from xyzfile if necessary
+        if self.geo_from_xyz is not None:
+            elements_from_xyz = np.array(self.geo_from_xyz.get_chemical_symbols())
+            elements_from_output = np.array(self.geo_from_output.get_chemical_symbols())
+            coords_from_xyz = np.array(self.geo_from_xyz.get_positions())
+            coords_from_output = np.array(self.geo_from_output.get_positions())
+            assert coords_from_xyz.shape == coords_from_output.shape
+            q_review = reorder_inertia_hungarian(elements_from_xyz, elements_from_output,
+                                                 coords_from_xyz, coords_from_output)
+
+            coords_from_output = coords_from_output[q_review]
+            rmsd_ = rmsd(coords_from_xyz, coords_from_output)
+
+            if rmsd_ > 1e-5:
+                self.warnings.append(f"Difference between geometry from output and xyzfile. RMSD = {rmsd_}")
 
     def parse_orca5_output(self, lines_):
         """
@@ -470,8 +599,51 @@ class Orca5:
                 # TODO read from xyz as an option?
             elif job_type in ("FREQ", "ANFREQ", "NUMFREQ"):
                 self.job_type_objs["FREQ"].get_thermochemistry(lines_)
+                if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
+
+                    # Read the engrad to determine if we have a minimum.
+                    # 2 possibilities: to obtain the engrad. From the xyz filename or from the freq job filename.
+                    temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
+                    engrad_from_coord = Path(temp_path)
+                    engrad_from_coord = engrad_from_coord.with_suffix(".engrad")
+                    if engrad_from_coord.is_file():
+                        self.job_type_objs["SP"].read_gradient(engrad_from_coord.resolve())
+                        cut_off = self.job_type_objs["SP"].gradients_cut_off
+                        # Gradient check atol of 5e-6
+                        diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                        if np.any(diff_wrt_ref < 0.0):
+                            max_grad = np.max(self.job_type_objs["SP"].gradients)
+                            self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                        else:
+                            self.job_type_objs["FREQ"].neligible_gradient = True
+                    else:
+                        temp_path = path.join(self.root_path, self.input_name)
+                        engrad_from_inp = Path(temp_path)
+                        engrad_from_inp = engrad_from_inp.with_suffix(".engrad")
+                        if engrad_from_inp.is_file():
+                            self.job_type_objs["SP"].read_gradient(engrad_from_inp.resolve())
+                            cut_off = self.job_type_objs["SP"].gradients_cut_off
+                            diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                            if np.any(diff_wrt_ref < 0.0):
+                                max_grad = np.max(self.job_type_objs["SP"].gradients)
+                                self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                            else:
+                                self.job_type_objs["FREQ"].neligible_gradient = True
+                        else:
+                            self.warnings.append("No engrad can be found for a frequency calculation")
+
             elif job_type == "CPCM":
                 self.job_type_objs["CPCM"].get_cpcm_details(lines_)
+
+        if "OPT" not in self.job_types:
+            if "FREQ" in self.job_types:
+                self.geo_from_output = self.job_type_objs["FREQ"].geo_from_output
+                self.job_type_objs["SP"].geo_from_output = self.job_type_objs["FREQ"].geo_from_output
+            elif "SP" in self.job_types:
+                self.geo_from_output = self.job_type_objs["SP"].geo_from_output
+        else:
+            self.geo_from_output = self.job_type_objs["OPT"].geo_from_output
+            self.job_type_objs["SP"].geo_from_output = self.job_type_objs["OPT"].geo_from_output
 
     def find_input_sections(self, lines_):
         """
@@ -499,11 +671,11 @@ class Orca5:
         if "OPT" in self.keywords["simple"]:
             self.job_types.append("OPT")
         elif "OPTTS" in self.keywords["simple"]:
-            self.job_types.append("OPTTS")
+            self.job_types.append("OPT")
 
         if "FREQ" in self.keywords["simple"]:
             self.job_types.append("FREQ")
-        elif "ANFREQ"  in self.keywords["simple"]:
+        elif "ANFREQ" in self.keywords["simple"]:
             self.job_types.append("ANFREQ")
         elif "NUMFREQ" in self.keywords["simple"]:
             self.job_types.append("NUMFREQ")
@@ -512,6 +684,9 @@ class Orca5:
             self.job_types.append("IRC")
         elif "ENGRAD" in self.keywords["simple"]:
             self.job_types.append("ENGRAD")
+
+        if "QM/XTB" in self.keywords["simple"]:
+            self.job_types.append("QMMM")
 
         solvent = None
         req_kw = None
@@ -608,6 +783,63 @@ class Orca5:
 
                     self.method.cpcm = self.keywords["CPCM"]
 
+    def get_level_of_theory(self):
+        """
+        Only support some DFT functional now
+        :return:
+        :rtype:
+        """
+        level_of_theory = ""
+        if self.method.keywords["functional"] is not None:
+            level_of_theory += self.method.keywords["functional"]
+
+        if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
+            basis = self.basis.keywords["basis"]
+            level_of_theory += f"/{basis}"
+
+        if "CPCM" in self.job_types:
+            if self.keywords["CPCM"].keywords["smd"].lower() == "true":
+                solvent = self.keywords["CPCM"].keywords["smdsolvent"]
+                level_of_theory = f"SMD{(solvent)})/" + level_of_theory
+            else:
+                solvent = self.keywords["CPCM"].solvent
+                fepstype = self.keywords["CPCM"].keywords["fepstype"]
+                level_of_theory = f"{fepstype}{(solvent)})/" + level_of_theory
+
+        self.level_of_theory = level_of_theory
+
+    def create_labelled_data(self):
+        """
+
+        :return:
+        :rtype:
+        """
+        # Create the thermochemistry correction from an optimized geometry first
+        thermochemistry = {}
+        single_point = {}
+
+        if "FREQ" in self.job_type_objs.keys():
+            if "OPT" in self.job_type_objs.keys() or self.job_type_objs["FREQ"].neligible_gradient:
+                thermochemistry[self.level_of_theory + "--ZPE"] = self.job_type_objs["FREQ"].zero_pt_energy
+                thermochemistry[self.level_of_theory + "--thermal"] = \
+                    self.job_type_objs["FREQ"].total_thermal_correction
+                thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
+                    self.job_type_objs["FREQ"].thermal_enthalpy_correction
+                thermochemistry[self.level_of_theory + "--final_entropy_term"] = \
+                    self.job_type_objs["FREQ"].final_entropy_term
+                thermochemistry[self.level_of_theory + "--elec_energy"] = \
+                    self.job_type_objs["FREQ"].elec_energy
+                thermochemistry[self.level_of_theory + "--total_thermal_energy"] = \
+                    self.job_type_objs["FREQ"].total_thermal_energy
+                thermochemistry[self.level_of_theory + "--total_enthalpy"] = \
+                    self.job_type_objs["FREQ"].total_enthalpy
+                thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
+                    self.job_type_objs["FREQ"].final_gibbs_free_energy
+                self.labelled_data.append(thermochemistry)
+        elif "SP" in self.job_type_objs.keys():
+            if "OPT" not in self.job_type_objs.keys() and "FREQ" not in self.job_type_objs.keys():
+                single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
+                self.labelled_data.append(single_point)
 
 
 # ORCA5 simple keywords
@@ -751,11 +983,3 @@ def get_orca5_keywords(lines_):
     keywords["simple"] = [item.upper() for item in keywords["simple"]]
     return keywords, {"coord_type": coord_type, "coord_path": coord_path,
                       "multiplicity": multiplicity, "charge": charge}, name
-
-
-
-
-
-
-
-
