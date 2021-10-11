@@ -8,8 +8,412 @@ from ase.io import read
 from pathlib import Path
 
 
-# TODO If no OPT is in the job_type but there is FREQ, check the engrad to ensure that the structure is a min
-# Classes related to Detailed Keywords
+# TODO Add ALPB support
+# TODO Add ALPB and GFN2 to labelled data
+# TODO The key case can be very annoying now. Need to ADD an doc here for clarity on the use of CASE
+
+
+class Orca5:
+    """
+    Read a folder that contains data generated from Orca 5.0 and create the relevant ASE objects
+    Supported extensions for ORCA5 output are out, wlm01, coronab, lic01 and hpc-mn1
+    Molecules are created as ASE Atoms object
+    !!!Maybe compatible with ORCA 4, but use at your own risk
+    """
+
+    def __init__(self, orca_out_file,
+                 property_path=None,
+                 engrad_path=None,
+                 output_path=None,
+                 safety_check=False):
+
+        # Get the root name of the orca_out_file
+        self.root_name = None
+        self.root_path = path.dirname(orca_out_file)
+        self.property_path = property_path  # Extension is .txt. NOT USED FOR NOW 20210930
+        self.engrad_path = engrad_path  # Extension is .engrad
+        self.output_path = orca_out_file  # Extension can be .out, .coronab, .wml01, .lic001
+        self.job_types = []  # If job_types is None after processing the given folder
+        self.level_of_theory = None  # e.g CPCM(solvent)/B97-3c, CPCM(solvent)/wB97X-V/def2-TZVPP//PBEh-3c
+        self.labelled_data: Dict[str, str] = {}  # Used to create a pandas for writing to excel
+        self.warnings = []
+        # Each job type will have its own object
+        # SP: Scf
+        # ENGRAD: Scf
+        # OPT: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
+        # OPTTS: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
+        # Freq: Scf + Freq
+        # IRC: Scf + IRC
+        self.job_type_objs = {}
+        self.method: Method
+        self.method = None  # All job type must have a Method object
+        self.basis: Basis
+        self.basis = None  # All job type must have a Basis object
+        self.geo_from_output: Atoms
+        self.geo_from_output = None  # All properties are derived from this structure.
+        self.geo_from_xyz: Atoms
+        self.geo_from_xyz = None  # The actual xyzfile used for the Orca 5 calculation
+        self.completed_job = False  # A valid output file needs to have ORCA TERMINATED NORMALLY
+
+        # Only property file -> single point, spectroscopic properties? Elec energy here doesn't include SRM
+        with open(orca_out_file, "r") as f:
+            lines = f.readlines()
+
+        # Check if the ORCA 5 output is valid. If not we will not proceed further
+        if "ORCA TERMINATED NORMALLY" in lines[-2]:
+            self.completed_job = True
+
+        if self.completed_job:
+            self.input_section = {"start": 0, "end": 0}
+            self.find_input_sections(lines)
+
+            # keywords used in the Orca 5 calculation are stored in <<self.keywords>>
+            # self.coord_spec is a dict that contains
+            # - "coord_type": xyz, xyzfile - "coord_path" - "charge" - "multiplicity
+            # self.input_name is obtained from the input section "NAME = .... "
+            self.keywords, self.coord_spec, self.input_name = \
+                get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
+
+            if self.coord_spec["coord_type"] == "xyzfile":
+                found_xyzfile = False
+                temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
+                from_root = None
+                if Path(temp_path).is_file():
+                    found_xyzfile = True
+                    self.geo_from_xyz = read(temp_path)
+                else:
+                    from_root = path.join(self.root_path, self.input_name)
+                    from_root = Path(from_root)
+                    from_root = from_root.with_suffix(".xyz")
+                    if from_root.is_file():
+                        self.geo_from_xyz = read(from_root.resolve())
+                        found_xyzfile = True
+                assert found_xyzfile, f"Sorry, we can't find {temp_path} or {from_root.resolve()}"
+
+            self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
+
+            self.determine_jobtype()
+            self.parse_orca5_output(lines[self.input_section["end"]:])
+            self.get_level_of_theory()
+            # compare the geometry from output and from xyzfile if necessary
+            if self.geo_from_xyz is not None and not self.method.is_qmmm:
+                # TODO check the QM atoms with the corresponding atom in the xyzfile
+                rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
+                if rmsd_ > 1e-5:
+                    self.warnings.append(f"Difference between geometry from output and xyzfile. RMSD = {rmsd_}")
+        else:
+            self.warnings.append("INCOMPLETE ORCA5 job detect!")
+
+    def parse_orca5_output(self, lines_):
+        """
+        job_types will determine what information to extract
+        SP: only final single point energy
+        Opt:
+        :return:
+        :rtype:
+        """
+        for job_type in self.job_types:
+            if job_type == "SP":
+                self.job_type_objs["SP"].get_final_sp_energy(lines_)
+            elif job_type == "OPT":
+                self.job_type_objs["OPT"].get_opt_geo(lines_)
+                # TODO read from xyz as an option?
+            elif job_type in ("FREQ", "ANFREQ", "NUMFREQ"):
+                self.job_type_objs["FREQ"].get_thermochemistry(lines_)
+                if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
+
+                    # Read the engrad to determine if we have a minimum.
+                    # 2 possibilities: to obtain the engrad. From the xyz filename or from the freq job filename.
+                    temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
+                    engrad_from_coord = Path(temp_path)
+                    engrad_from_coord = engrad_from_coord.with_suffix(".engrad")
+                    if engrad_from_coord.is_file():
+                        self.job_type_objs["SP"].read_gradient(engrad_from_coord.resolve())
+                        cut_off = self.job_type_objs["SP"].gradients_cut_off
+                        # Gradient check atol of 5e-6
+                        diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                        if np.any(diff_wrt_ref < 0.0):
+                            max_grad = np.max(self.job_type_objs["SP"].gradients)
+                            self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                        else:
+                            self.job_type_objs["FREQ"].neligible_gradient = True
+                    else:
+                        temp_path = path.join(self.root_path, self.input_name)
+                        engrad_from_inp = Path(temp_path)
+                        engrad_from_inp = engrad_from_inp.with_suffix(".engrad")
+                        if engrad_from_inp.is_file():
+                            self.job_type_objs["SP"].read_gradient(engrad_from_inp.resolve())
+                            cut_off = self.job_type_objs["SP"].gradients_cut_off
+                            diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                            if np.any(diff_wrt_ref < 0.0):
+                                max_grad = np.max(self.job_type_objs["SP"].gradients)
+                                self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                            else:
+                                self.job_type_objs["FREQ"].neligible_gradient = True
+                        else:
+                            self.warnings.append("No engrad can be found for a frequency calculation")
+
+            elif job_type == "CPCM":
+                self.job_type_objs["CPCM"].get_cpcm_details(lines_)
+            # TODO read QMMM details
+            # elif job_type == "QMMM":
+            #     print()
+
+        if "OPT" not in self.job_types:
+            if "FREQ" in self.job_types:
+                self.geo_from_output = self.job_type_objs["FREQ"].geo_from_output
+                self.job_type_objs["SP"].geo_from_output = self.job_type_objs["FREQ"].geo_from_output
+            elif "SP" in self.job_types:
+                self.geo_from_output = self.job_type_objs["SP"].geo_from_output
+        else:
+            self.geo_from_output = self.job_type_objs["OPT"].geo_from_output
+            self.job_type_objs["SP"].geo_from_output = self.job_type_objs["OPT"].geo_from_output
+
+    def find_input_sections(self, lines_):
+        """
+
+        :param lines_:
+        :type lines_: [str]
+        :return:
+        :rtype:
+        """
+        separator_count = 0
+        for idx, line_ in enumerate(lines_):
+            if "INPUT FILE" in line_:
+                self.input_section["start"] = idx + 2
+            elif "****END OF INPUT****" in line_:
+                self.input_section["end"] = idx
+
+    def determine_jobtype(self):
+        """
+        Go through the simple keywords to determine the jobtype.
+        Fill in parameters of the detailed keywords from the simple keyword
+        :return:
+        :rtype:
+        """
+
+        if "OPT" in self.keywords["simple"]:
+            self.job_types.append("OPT")
+        elif "OPTTS" in self.keywords["simple"]:
+            self.job_types.append("OPT")
+
+        if "FREQ" in self.keywords["simple"]:
+            self.job_types.append("FREQ")
+        elif "ANFREQ" in self.keywords["simple"]:
+            self.job_types.append("ANFREQ")
+        elif "NUMFREQ" in self.keywords["simple"]:
+            self.job_types.append("NUMFREQ")
+
+        if "IRC" in self.keywords["simple"]:
+            self.job_types.append("IRC")
+        elif "ENGRAD" in self.keywords["simple"]:
+            self.job_types.append("ENGRAD")
+
+        if "QM/XTB" in self.keywords["simple"]:
+            self.job_types.append("QMMM")
+        # CPCM section
+        solvent = None
+        req_kw = None
+        sanity_check = 0
+        for kw in self.keywords["simple"]:
+            req_kw = re.search("CPCM", kw)
+            if req_kw is not None:
+                self.job_types.append("CPCM")
+                solvent = req_kw.string.split("(")[-1].strip(")")
+                sanity_check += 1
+        assert sanity_check <= 1, f"You have {sanity_check} CPCM simple keyword in the ORCA5 input: "
+        # This happens when there is no !CPCM(solvent) but there is %CPCM .... end
+        if "CPCM" in self.keywords and "CPCM" not in self.job_types:
+            self.job_types.append("CPCM")
+
+        # Check if it is a single point
+        if len(self.job_types) == 0:
+            is_single_point = False
+            for item in dft_simple_keywords:
+                if item.upper() in self.keywords["simple"]:
+                    is_single_point = True
+                    break
+            if not is_single_point:
+                for item in general_keywords:
+                    if item.upper() in self.keywords["simple"]:
+                        is_single_point = True
+                        break
+            if not is_single_point:
+                self.job_types = None
+            else:
+                self.job_types.append("SP")
+
+        # Create or copy the required job_type objs
+        if self.job_types is not None:
+
+            # All job type will contain a method, basis and Scf object
+            if "method" not in self.keywords.keys():
+                self.keywords["method"] = Method()
+
+            self.method = self.keywords["method"]
+
+            if "basis" not in self.keywords.keys():
+                self.basis = Basis()
+
+            self.basis.process_simple_keywords(self.keywords["simple"])
+
+            if "SP" not in self.job_types:
+                self.job_types.append("SP")
+            if "SCF" not in self.keywords.keys():
+                self.job_type_objs["SP"] = Scf()
+            else:
+                self.job_type_objs["SP"] = self.keywords["SCF"]
+
+            for kw in scf_conv_simple_keywords:
+                if kw.upper() in self.keywords["simple"]:
+                    self.job_type_objs["SP"].keywords["convergence"] = kw
+
+            for kw in dft_simple_keywords:
+                if kw.upper() in self.keywords["simple"]:
+                    self.method.keywords["functional"] = kw
+                    self.method.keywords["method"] = "dft"
+
+            # Other job types are specified here
+            for item in self.job_types:
+                # Detailed keywords used in ORCA 5 % ... end are in lowercase! e.g. self.method.keywords["runtyp"]
+                # each key in self.keywords is in uppercase. Each of them correspond to an object in self.job_type_objs
+                if item == "SP":
+                    self.method = self.keywords["method"]
+                    self.method.keywords["runtyp"] = "SP"
+
+                elif item == "OPT":
+                    self.method = self.keywords["method"]
+                    self.method.keywords["runtyp"] = "OPT"
+
+                    if "GEOM" not in self.keywords:
+                        self.job_type_objs["OPT"] = Geom()
+                    else:
+                        self.job_type_objs["OPT"] = self.keywords["GEOM"]
+
+                elif item in ('FREQ', "ANFREQ", "NUMFREQ"):
+                    if "OPT" not in self.job_types:
+                        self.method = self.keywords["method"]
+                        self.method.keywords["runtyp"] = "FREQ"
+
+                    if "FREQ" not in self.keywords:
+                        self.keywords["FREQ"] = Freq()
+                        if item == "ANFREQ":
+                            self.keywords["FREQ"].keywords["anfreq"] = True
+                        elif item == "NUMFREQ":
+                            self.keywords["FREQ"].keywords["numfreq"] = True
+                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
+                    else:
+                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
+
+                elif item == "CPCM":
+                    if "CPCM" not in self.keywords:
+                        self.keywords["CPCM"] = Cpcm(solvent)
+                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
+
+                    self.method.cpcm = self.keywords["CPCM"]
+
+                elif item == "QMMM":
+                    if "QMMM" not in self.keywords:
+                        self.keywords["QMMM"] = Qmmm()
+                    self.job_type_objs["QMMM"] = self.keywords["QMMM"]
+                    self.method.is_qmmm = True
+
+    def get_level_of_theory(self):
+        """
+        Only support some DFT functional now
+        :return:
+        :rtype:
+        """
+        level_of_theory = ""
+        if self.method.keywords["functional"] is not None:
+            level_of_theory += self.method.keywords["functional"]
+
+        if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
+            basis = self.basis.keywords["basis"]
+            level_of_theory += f"/{basis}"
+
+        if "CPCM" in self.job_types:
+            if self.keywords["CPCM"].keywords["smd"].lower() == "true":
+                solvent = self.keywords["CPCM"].keywords["smdsolvent"]
+                level_of_theory = f"SMD({(solvent)})/" + level_of_theory
+            else:
+                solvent = self.keywords["CPCM"].solvent
+                fepstype = self.keywords["CPCM"].keywords["fepstype"]
+                level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
+
+        self.level_of_theory = level_of_theory
+
+    def create_labelled_data(self):
+        """
+
+        :return:
+        :rtype:
+        """
+        # Create the thermochemistry correction from an optimized geometry first
+        thermochemistry = {}
+        single_point = {}
+
+        if "FREQ" in self.job_type_objs.keys():
+            if "OPT" in self.job_type_objs.keys() or self.job_type_objs["FREQ"].neligible_gradient:
+                thermochemistry[self.level_of_theory + "--ZPE"] = self.job_type_objs["FREQ"].zero_pt_energy
+                thermochemistry[self.level_of_theory + "--thermal"] = \
+                    self.job_type_objs["FREQ"].total_thermal_correction
+                thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
+                    self.job_type_objs["FREQ"].thermal_enthalpy_correction
+                thermochemistry[self.level_of_theory + "--final_entropy_term"] = \
+                    self.job_type_objs["FREQ"].final_entropy_term
+                thermochemistry[self.level_of_theory + "--elec_energy"] = \
+                    self.job_type_objs["FREQ"].elec_energy
+                thermochemistry[self.level_of_theory + "--total_thermal_energy"] = \
+                    self.job_type_objs["FREQ"].total_thermal_energy
+                thermochemistry[self.level_of_theory + "--total_enthalpy"] = \
+                    self.job_type_objs["FREQ"].total_enthalpy
+                thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
+                    self.job_type_objs["FREQ"].final_gibbs_free_energy
+                self.labelled_data = {**self.labelled_data, **thermochemistry}
+        elif "SP" in self.job_type_objs.keys():
+            if "OPT" not in self.job_type_objs.keys() and "FREQ" not in self.job_type_objs.keys():
+                single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
+                self.labelled_data = {**self.labelled_data, **single_point}
+
+
+# ORCA5 simple keywords
+scf_conv_simple_keywords = ("NORMALSCF", "LOOSESCF", "SLOPPYSCF", "STRONGSCF", "TIGHTSCF", "VERYTIGHTSCF",
+                            "EXTREMESCF", "SCFCONV")
+
+geom_conv_simple_keywords = ("VERYTIGHTOPT", "TIGHTOPT", "NORMALOPT", "LOOSEOPT")
+
+grid_simple_keywords = ("DEFGRID", "NOFINALGRIDX")
+
+runtypes_simple_keywords = ("ENERGY", "SP", "OPT", "ZOPT", "COPT", "GDIIS-COPT", "GDIIS-ZOPT", "ENGRAD", "NUMGRAD",
+                            "NUMFREQ", "NUMNACME", "MD", "CIM")
+
+general_keywords = ("HF", "DFT", "FOD")
+
+# ORCA5 DFT functional
+dft_simple_keywords = ("PBEh-3c", "r2scan-3c", "B97-3c",
+                       "B3LYP", "M06-2X", "wB97X-V", "wB97X-D4", "wB97M-V", "wB97M-D4")
+
+qmmm_simple_keywords = ("QM/XTB")
+
+# ORCA5 basis sets keywords
+basis_set_keywords = {"basis_set_keywords": ("def2-SVP", "def2-SV(P)", "def2-TZVP", "def2-TZVP(-f)",
+                                             "def2-TZVPP", "def2-QZVP", "def2-QZVPP"),
+                      "aux_basis_coulomb_keywords": ("def2/J", "SARC/J", "x2c/J"),
+                      "aux_basis_coulomb_ex_keywords": ("def2/JK", "def2/JKsmall"),
+                      "aux_basis_correlation_keywords": ("def2-SVP/C", "def2-TZVP/C", "def2-TZVPP/C", "def2-QZVPP/C",
+                                                         "def2-SVPD/C", "def2-TZVPD/C", "def2-TZVPPD/C",
+                                                         "def2-QZVPPD/C"),
+                      "aux_general_keywords": "autoaux"
+                      }
+
+# ORCA5 input block
+pal_block = {}
+
+# ORCA4 simple keywords
+grid_simple_keywords = ("GRID", "GRIDX", "NOFINALGRIDX", "NOFINALGRID")
+
+# Classes related to Detailed Keywords---------------------------------------------------------------------------------
 
 
 class Method:
@@ -312,7 +716,7 @@ class Freq:
                     if len(temp) == 3:
                         self.frequencies.append(float(temp[-2]))
                     elif len(temp) == 5:
-                        self.frequencies.append(float(temp[-3]))
+                        self.frequencies.append(float(temp[1]))
                 except ValueError:
                     start_to_read_freq = False
                     freq_read = True
@@ -367,7 +771,8 @@ class Freq:
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the total enthalpy"
                                          f" at the expected index")
-                elif "Final entropy term                ..." in line:
+                elif "Total entropy correction          ..." in line:
+                    # The final entropy term in ORCA 5 needs to be multiply by -1
                     try:
                         self.final_entropy_term = float(line.split()[-4])
                     except ValueError:
@@ -502,394 +907,7 @@ class Qmmm:
         self.single_value_int = ("charge_total", "multi_total")
         # Multi_values keywords required an "end" to terminate
         self.multi_values = ("qmatoms")
-# END of classes related to detailed keyword
-
-
-class Orca5:
-    """
-    Read a folder that contains data generated from Orca 5.0 and create the relevant ASE objects
-    Supported extensions for ORCA5 output are out, wlm01, coronab, lic01 and hpc-mn1
-    Molecules are created as ASE Atoms object
-    !!!Maybe compatible with ORCA 4, but use at your own risk
-    """
-
-    def __init__(self, orca_out_file,
-                 property_path=None,
-                 engrad_path=None,
-                 output_path=None,
-                 safety_check=False):
-
-        # Get the root name of the orca_out_file
-        self.root_name = None
-        self.root_path = path.dirname(orca_out_file)
-        self.property_path = property_path  # Extension is .txt. NOT USED FOR NOW 20210930
-        self.engrad_path = engrad_path  # Extension is .engrad
-        self.output_path = orca_out_file  # Extension can be .out, .coronab, .wml01, .lic001
-        self.job_types = []  # If job_types is None after processing the given folder
-        self.level_of_theory = None  # e.g CPCM(solvent)/B97-3c, CPCM(solvent)/wB97X-V/def2-TZVPP//PBEh-3c
-        self.labelled_data: List[Dict[str, str]] = [] # Used to create a pandas for writing to excel
-        self.warnings = []
-        # Each job type will have its own object
-        # SP: Scf
-        # ENGRAD: Scf
-        # OPT: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
-        # OPTTS: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
-        # Freq: Scf + Freq
-        # IRC: Scf + IRC
-        self.job_type_objs = {}
-        self.method: Method
-        self.method = None  # All job type must have a Method object
-        self.basis: Basis
-        self.basis = None  # All job type must have a Basis object
-        self.geo_from_output: Atoms
-        self.geo_from_output = None  # All properties are derived from this structure.
-        self.geo_from_xyz: Atoms
-        self.geo_from_xyz = None  # The actual xyzfile used for the Orca 5 calculation
-        # an incomplete/unsupported job is assumed
-
-        # Only property file -> single point, spectroscopic properties? Elec energy here doesn't include SRM
-        with open(orca_out_file, "r") as f:
-            lines = f.readlines()
-
-        self.input_section = {"start": 0, "end": 0}
-        self.find_input_sections(lines)
-
-        # keywords used in the Orca 5 calculation are stored in <<self.keywords>>
-        # self.coord_spec is a dict that contains - "coord_type": xyz, xyzfile - "coord_path" - "charge" - "multiplicity
-        # self.input_name is obtained from the input section "NAME = .... "
-        self.keywords, self.coord_spec, self.input_name = \
-            get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
-
-        if self.coord_spec["coord_type"] == "xyzfile":
-            found_xyzfile = False
-            temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
-            from_root = None
-            if Path(temp_path).is_file():
-                found_xyzfile = True
-                self.geo_from_xyz = read(temp_path)
-            else:
-                from_root = path.join(self.root_path, self.input_name)
-                from_root = Path(from_root)
-                from_root = from_root.with_suffix(".xyz")
-                if from_root.is_file():
-                    self.geo_from_xyz = read(from_root.resolve())
-                    found_xyzfile = True
-            assert found_xyzfile, f"Sorry, we can't find {temp_path} or {from_root.resolve()}"
-
-        self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
-
-        self.determine_jobtype()
-        self.parse_orca5_output(lines[self.input_section["end"]:])
-        self.get_level_of_theory()
-        # compare the geometry from output and from xyzfile if necessary
-        if self.geo_from_xyz is not None and not self.method.is_qmmm:
-            rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
-            if rmsd_ > 1e-5:
-                self.warnings.append(f"Difference between geometry from output and xyzfile. RMSD = {rmsd_}")
-
-    def parse_orca5_output(self, lines_):
-        """
-        job_types will determine what information to extract
-        SP: only final single point energy
-        Opt:
-        :return:
-        :rtype:
-        """
-        for job_type in self.job_types:
-            if job_type == "SP":
-                self.job_type_objs["SP"].get_final_sp_energy(lines_)
-            elif job_type == "OPT":
-                self.job_type_objs["OPT"].get_opt_geo(lines_)
-                # TODO read from xyz as an option?
-            elif job_type in ("FREQ", "ANFREQ", "NUMFREQ"):
-                self.job_type_objs["FREQ"].get_thermochemistry(lines_)
-                if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
-
-                    # Read the engrad to determine if we have a minimum.
-                    # 2 possibilities: to obtain the engrad. From the xyz filename or from the freq job filename.
-                    temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
-                    engrad_from_coord = Path(temp_path)
-                    engrad_from_coord = engrad_from_coord.with_suffix(".engrad")
-                    if engrad_from_coord.is_file():
-                        self.job_type_objs["SP"].read_gradient(engrad_from_coord.resolve())
-                        cut_off = self.job_type_objs["SP"].gradients_cut_off
-                        # Gradient check atol of 5e-6
-                        diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
-                        if np.any(diff_wrt_ref < 0.0):
-                            max_grad = np.max(self.job_type_objs["SP"].gradients)
-                            self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
-                        else:
-                            self.job_type_objs["FREQ"].neligible_gradient = True
-                    else:
-                        temp_path = path.join(self.root_path, self.input_name)
-                        engrad_from_inp = Path(temp_path)
-                        engrad_from_inp = engrad_from_inp.with_suffix(".engrad")
-                        if engrad_from_inp.is_file():
-                            self.job_type_objs["SP"].read_gradient(engrad_from_inp.resolve())
-                            cut_off = self.job_type_objs["SP"].gradients_cut_off
-                            diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
-                            if np.any(diff_wrt_ref < 0.0):
-                                max_grad = np.max(self.job_type_objs["SP"].gradients)
-                                self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
-                            else:
-                                self.job_type_objs["FREQ"].neligible_gradient = True
-                        else:
-                            self.warnings.append("No engrad can be found for a frequency calculation")
-
-            elif job_type == "CPCM":
-                self.job_type_objs["CPCM"].get_cpcm_details(lines_)
-            # TODO read QMMM details
-            # elif job_type == "QMMM":
-            #     print()
-
-        if "OPT" not in self.job_types:
-            if "FREQ" in self.job_types:
-                self.geo_from_output = self.job_type_objs["FREQ"].geo_from_output
-                self.job_type_objs["SP"].geo_from_output = self.job_type_objs["FREQ"].geo_from_output
-            elif "SP" in self.job_types:
-                self.geo_from_output = self.job_type_objs["SP"].geo_from_output
-        else:
-            self.geo_from_output = self.job_type_objs["OPT"].geo_from_output
-            self.job_type_objs["SP"].geo_from_output = self.job_type_objs["OPT"].geo_from_output
-
-    def find_input_sections(self, lines_):
-        """
-
-        :param lines_:
-        :type lines_: [str]
-        :return:
-        :rtype:
-        """
-        separator_count = 0
-        for idx, line_ in enumerate(lines_):
-            if "INPUT FILE" in line_:
-                self.input_section["start"] = idx + 2
-            elif "****END OF INPUT****" in line_:
-                self.input_section["end"] = idx
-
-    def determine_jobtype(self):
-        """
-        Go through the simple keywords to determine the jobtype.
-        Fill in parameters of the detailed keywords from the simple keyword
-        :return:
-        :rtype:
-        """
-
-        if "OPT" in self.keywords["simple"]:
-            self.job_types.append("OPT")
-        elif "OPTTS" in self.keywords["simple"]:
-            self.job_types.append("OPT")
-
-        if "FREQ" in self.keywords["simple"]:
-            self.job_types.append("FREQ")
-        elif "ANFREQ" in self.keywords["simple"]:
-            self.job_types.append("ANFREQ")
-        elif "NUMFREQ" in self.keywords["simple"]:
-            self.job_types.append("NUMFREQ")
-
-        if "IRC" in self.keywords["simple"]:
-            self.job_types.append("IRC")
-        elif "ENGRAD" in self.keywords["simple"]:
-            self.job_types.append("ENGRAD")
-
-        if "QM/XTB" in self.keywords["simple"]:
-            self.job_types.append("QMMM")
-
-        solvent = None
-        req_kw = None
-        sanity_check = 0
-        for kw in self.keywords["simple"]:
-            req_kw = re.search("CPCM", kw)
-            if req_kw is not None:
-                self.job_types.append("CPCM")
-                solvent = req_kw.string.split("(")[-1].strip(")")
-                sanity_check += 1
-        assert sanity_check <= 1, f"You have {sanity_check} CPCM simple keyword in the ORCA5 input: "
-
-        # Check if it is a single point
-        if len(self.job_types) == 0:
-            is_single_point = False
-            for item in dft_simple_keywords:
-                if item.upper() in self.keywords["simple"]:
-                    is_single_point = True
-                    break
-            if not is_single_point:
-                for item in general_keywords:
-                    if item.upper() in self.keywords["simple"]:
-                        is_single_point = True
-                        break
-            if not is_single_point:
-                self.job_types = None
-            else:
-                self.job_types.append("SP")
-
-        # Create or copy the required job_type objs
-        if self.job_types is not None:
-
-            # All job type will contain a method, basis and Scf object
-            if "METHOD" not in self.keywords.keys():
-                self.keywords["method"] = Method()
-                self.method = self.keywords["method"]
-
-            if "basis" not in self.keywords.keys():
-                self.basis = Basis()
-                self.basis.process_simple_keywords(self.keywords["simple"])
-
-            if "SP" not in self.job_types:
-                self.job_types.append("SP")
-            if "SCF" not in self.keywords.keys():
-                self.job_type_objs["SP"] = Scf()
-            else:
-                self.job_type_objs["SP"] = self.keywords["SCF"]
-
-            for kw in scf_conv_simple_keywords:
-                if kw.upper() in self.keywords["simple"]:
-                    self.job_type_objs["SP"].keywords["convergence"] = kw
-
-            for kw in dft_simple_keywords:
-                if kw.upper() in self.keywords["simple"]:
-                    self.method.keywords["functional"] = kw
-                    self.method.keywords["method"] = "dft"
-
-            # Other job types are specified here
-            for item in self.job_types:
-                # Detailed keywords used in ORCA 5 % ... end are in lowercase! e.g. self.method.keywords["runtyp"]
-                # each key in self.keywords is in uppercase. Each of them correspond to an object in self.job_type_objs
-                if item == "SP":
-                    self.method = self.keywords["method"]
-                    self.method.keywords["runtyp"] = "SP"
-
-                elif item == "OPT":
-                    self.method = self.keywords["method"]
-                    self.method.keywords["runtyp"] = "OPT"
-
-                    if "GEOM" not in self.keywords:
-                        self.job_type_objs["OPT"] = Geom()
-                    else:
-                        self.job_type_objs["OPT"] = self.keywords["GEOM"]
-
-                elif item in ('FREQ', "ANFREQ", "NUMFREQ"):
-                    if "OPT" not in self.job_types:
-                        self.method = self.keywords["method"]
-                        self.method.keywords["runtyp"] = "FREQ"
-
-                    if "FREQ" not in self.keywords:
-                        self.keywords["FREQ"] = Freq()
-                        if item == "ANFREQ":
-                            self.keywords["FREQ"].keywords["anfreq"] = True
-                        elif item == "NUMFREQ":
-                            self.keywords["FREQ"].keywords["numfreq"] = True
-                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
-                    else:
-                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
-
-                elif item == "CPCM":
-                    if "CPCM" not in self.keywords:
-                        self.keywords["CPCM"] = Cpcm(solvent)
-                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
-
-                    self.method.cpcm = self.keywords["CPCM"]
-
-                elif item == "QMMM":
-                    if "QMMM" not in self.keywords:
-                        self.keywords["QMMM"] = Qmmm()
-                    self.job_type_objs["QMMM"] = self.keywords["QMMM"]
-                    self.method.is_qmmm = True
-
-    def get_level_of_theory(self):
-        """
-        Only support some DFT functional now
-        :return:
-        :rtype:
-        """
-        level_of_theory = ""
-        if self.method.keywords["functional"] is not None:
-            level_of_theory += self.method.keywords["functional"]
-
-        if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
-            basis = self.basis.keywords["basis"]
-            level_of_theory += f"/{basis}"
-
-        if "CPCM" in self.job_types:
-            if self.keywords["CPCM"].keywords["smd"].lower() == "true":
-                solvent = self.keywords["CPCM"].keywords["smdsolvent"]
-                level_of_theory = f"SMD{(solvent)})/" + level_of_theory
-            else:
-                solvent = self.keywords["CPCM"].solvent
-                fepstype = self.keywords["CPCM"].keywords["fepstype"]
-                level_of_theory = f"{fepstype}{(solvent)})/" + level_of_theory
-
-        self.level_of_theory = level_of_theory
-
-    def create_labelled_data(self):
-        """
-
-        :return:
-        :rtype:
-        """
-        # Create the thermochemistry correction from an optimized geometry first
-        thermochemistry = {}
-        single_point = {}
-
-        if "FREQ" in self.job_type_objs.keys():
-            if "OPT" in self.job_type_objs.keys() or self.job_type_objs["FREQ"].neligible_gradient:
-                thermochemistry[self.level_of_theory + "--ZPE"] = self.job_type_objs["FREQ"].zero_pt_energy
-                thermochemistry[self.level_of_theory + "--thermal"] = \
-                    self.job_type_objs["FREQ"].total_thermal_correction
-                thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
-                    self.job_type_objs["FREQ"].thermal_enthalpy_correction
-                thermochemistry[self.level_of_theory + "--final_entropy_term"] = \
-                    self.job_type_objs["FREQ"].final_entropy_term
-                thermochemistry[self.level_of_theory + "--elec_energy"] = \
-                    self.job_type_objs["FREQ"].elec_energy
-                thermochemistry[self.level_of_theory + "--total_thermal_energy"] = \
-                    self.job_type_objs["FREQ"].total_thermal_energy
-                thermochemistry[self.level_of_theory + "--total_enthalpy"] = \
-                    self.job_type_objs["FREQ"].total_enthalpy
-                thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
-                    self.job_type_objs["FREQ"].final_gibbs_free_energy
-                self.labelled_data.append(thermochemistry)
-        elif "SP" in self.job_type_objs.keys():
-            if "OPT" not in self.job_type_objs.keys() and "FREQ" not in self.job_type_objs.keys():
-                single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
-                self.labelled_data.append(single_point)
-
-
-# ORCA5 simple keywords
-scf_conv_simple_keywords = ("NORMALSCF", "LOOSESCF", "SLOPPYSCF", "STRONGSCF", "TIGHTSCF", "VERYTIGHTSCF",
-                            "EXTREMESCF", "SCFCONV")
-
-geom_conv_simple_keywords = ("VERYTIGHTOPT", "TIGHTOPT", "NORMALOPT", "LOOSEOPT")
-
-grid_simple_keywords = ("DEFGRID", "NOFINALGRIDX")
-
-runtypes_simple_keywords = ("ENERGY", "SP", "OPT", "ZOPT", "COPT", "GDIIS-COPT", "GDIIS-ZOPT", "ENGRAD", "NUMGRAD",
-                            "NUMFREQ", "NUMNACME", "MD", "CIM")
-
-general_keywords = ("HF", "DFT", "FOD")
-
-# ORCA5 DFT functional
-dft_simple_keywords = ("PBEh-3c", "r2scan-3c", "B97-3c",
-                       "B3LYP", "M06-2X", "wB97X-V", "wB97X-D4", "wB97M-V", "wB97M-D4")
-
-qmmm_simple_keywords = ("QM/XTB")
-
-# ORCA5 basis sets keywords
-basis_set_keywords = {"basis_set_keywords": ("def2-SVP", "def2-SV(P)", "def2-TZVP", "def2-TZVP(-f)",
-                                             "def2-TZVPP", "def2-QZVP", "def2-QZVPP"),
-                      "aux_basis_coulomb_keywords": ("def2/J", "SARC/J", "x2c/J"),
-                      "aux_basis_coulomb_ex_keywords": ("def2/JK", "def2/JKsmall"),
-                      "aux_basis_correlation_keywords": ("def2-SVP/C", "def2-TZVP/C", "def2-TZVPP/C", "def2-QZVPP/C",
-                                                         "def2-SVPD/C", "def2-TZVPD/C", "def2-TZVPPD/C",
-                                                         "def2-QZVPPD/C"),
-                      "aux_general_keywords": "autoaux"
-                      }
-
-# ORCA5 input block
-pal_block = {}
-
-# ORCA4 simple keywords
-grid_simple_keywords = ("GRID", "GRIDX", "NOFINALGRIDX", "NOFINALGRID")
+# END of classes related to detailed keyword---------------------------------------------------------------------------
 
 
 # Independent function collections
@@ -960,14 +978,21 @@ def get_orca5_keywords(lines_):
     for idx, item in enumerate(flatten_lines):
         if idx in idx_to_exclude:
             continue
+        elif current_detailed_kw is not None:
+            if item.lower() not in keywords[current_detailed_kw].keywords or item.lower() == "end":
+                current_detailed_kw = None
+
         if "!" in item:
             # Simple keywords
+            if current_detailed_kw is not None:
+                current_detailed_kw = None
             start_to_read_simple_kw = True
             keywords["simple"].append(item.strip("!").upper())
+
         elif "%" in item:
             start_to_read_simple_kw = False
             if current_detailed_kw is None:
-                current_detailed_kw = item.strip("%").lower()
+                current_detailed_kw = item.strip("%\n").upper()
                 if current_detailed_kw == "METHOD":
                     keywords[current_detailed_kw.upper()] = Method()
                 elif current_detailed_kw == "GEOM":
@@ -978,23 +1003,35 @@ def get_orca5_keywords(lines_):
                     keywords[current_detailed_kw.upper()] = Freq()
                 elif current_detailed_kw == "SCF":
                     keywords[current_detailed_kw.upper()] = Scf()
+                elif current_detailed_kw == "CPCM":
+                    if current_detailed_kw.upper() not in keywords:
+                        keywords[current_detailed_kw.upper()] = Cpcm("SMD")
                 else:
                     current_detailed_kw = None
         elif start_to_read_simple_kw:
             keywords["simple"].append(item.strip("!"))
+
         elif current_detailed_kw is not None:
-            if item in keywords[current_detailed_kw].keywords.keys():
-                if item not in keywords[current_detailed_kw].multi_values:
+            # We expect that item to be lowercase for this section
+            item_ = item.lower()
+            type_casted = False
+            if item_ in keywords[current_detailed_kw].keywords.keys():
+                if item_ not in keywords[current_detailed_kw].multi_values:
                     idx_to_exclude = [idx + 1]
                     value = flatten_lines[idx + 1]
 
-                    if item in keywords[current_detailed_kw].single_value_float:
+                    if item_ in keywords[current_detailed_kw].single_value_float:
                         value = float(value)
-                    elif item in keywords[current_detailed_kw].single_value_int:
+                        type_casted = True
+                    elif item_ in keywords[current_detailed_kw].single_value_int:
                         value = int(value)
+                        type_casted = True
 
-                    keywords[current_detailed_kw].keywords[item] = value
-                    current_detailed_kw = None
+                    if type_casted:
+                        keywords[current_detailed_kw].keywords[item_] = value
+                    else:
+                        keywords[current_detailed_kw].keywords[item_] = value.strip("\"\'\n")
+
                 else:
                     value_idx = idx + 1
                     idx_to_exclude = [value_idx]
@@ -1002,7 +1039,7 @@ def get_orca5_keywords(lines_):
                         keywords[current_detailed_kw].keywords[current_detailed_kw].append(flatten_lines[value_idx])
                         value_idx += 1
                         idx_to_exclude.append(value_idx)
-                    current_detailed_kw = None
+
         elif "NAME" in item:
             name = flatten_lines[idx + 1].strip()
             idx_to_exclude = [idx + 1]

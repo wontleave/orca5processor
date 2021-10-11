@@ -6,9 +6,12 @@ from orca5_utils import calc_rmsd_ase_atoms_non_pbs
 from reading_utilis import read_root_folders
 from orca5_utils import Orca5
 from os import listdir, path
+from pathlib import Path
+
 """
 Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN training
 """
+# TODO Slow reading in some cases!
 
 
 class Orca5Processor:
@@ -17,9 +20,10 @@ class Orca5Processor:
     """
     def __init__(self, root_folder_path,
                  post_process_type=None,
-                 display_warning=False
+                 display_warning=False,
+                 delete_incomplete_job=False
                  ):
-        self.orca5_objs = []
+
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
         self.orca5_in_pd = []
         # Get all the folders within the root
@@ -50,12 +54,12 @@ class Orca5Processor:
                     self.folders_to_orca5[folder].append(Orca5(out_file))
             time_end = time.perf_counter()
             print(f"DONE in {time_end-time_start:.2f} sec")
+
+        # Remove Orca 5 objects that are flagged as incomplete with option to delete the corresponding output file
+        self.remove_incomplete_job(delete_incomplete_job)
         # Post processing according to the process type indicated
         if display_warning:
             self.display_warning()
-
-        for key in self.folders_to_orca5:
-            self.orca5_to_pd(self.folders_to_orca5[key])
 
         if post_process_type.lower() == "stationary":
             # Check if all the folders have the same number of orca5 object
@@ -71,7 +75,7 @@ class Orca5Processor:
                             rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
                             if rmsd_ > 1e-5:
                                 ref_objs[key].append(obj)
-                        elif len(ref_objs[key]) > 1:
+                        else:
                             ref_objs[key].append(obj)
 
                     elif "FREQ" in obj.job_type_objs:
@@ -88,8 +92,12 @@ class Orca5Processor:
                                 print(f"Loosen cut-off from {orig_cut_off:.2E} to {loosen_cut_off:.2E}"
                                       f" - successful - Adding {obj.input_name}")
                                 ref_objs[key].append(obj)
+                                obj.job_type_objs["FREQ"].neligible_gradient = True
 
                 assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
+
+            for key in self.folders_to_orca5:
+                self.orca5_to_pd(self.folders_to_orca5[key])
 
             # All SP structures must be consistent with the structure in the reference obj
             sp_objs: Dict[str, List[Orca5]] = {}
@@ -104,19 +112,38 @@ class Orca5Processor:
                             sp_objs[key].append(obj)
 
             # Collect the self.labelled_data and make the pandas df
-            labeled_data: Dict[str, List[Dict[str, str]]] = {}
+            labeled_data: Dict[str, Dict[str, str]] = {}
+            row_labels = []
+            counter = 0
+            thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
             for key in ref_objs:
                 labeled_data[key] = ref_objs[key][0].labelled_data
                 for obj_ in sp_objs[key]:
-                    labeled_data[key] += obj_.labelled_data
-
-            combined_df = pd.DataFrame(labeled_data)
+                    thermo_corr_sp = {}
+                    corr = 0.0
+                    # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
+                    labeled_data[key] = {**labeled_data[key], **obj_.labelled_data}
+                    for item in ref_objs[key][0].labelled_data:
+                        opt_theory, thermo_corr_type = item.split("--")
+                        if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
+                            for sp_key in obj_.labelled_data:
+                                try:
+                                    corr += ref_objs[key][0].labelled_data[item]
+                                    corr_value = obj_.labelled_data[sp_key] + corr
+                                    thermo_corr_sp[f"{thermo_corr_type} -- {sp_key}//{opt_theory}"] = corr_value
+                                except TypeError:
+                                    raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
+                    labeled_data[key] = {**labeled_data[key], **thermo_corr_sp}
+                if counter == 0:
+                    row_labels = list(labeled_data[key].keys())
+                    counter += 1
+            combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
             combined_df.to_excel(path.join(root_folder_path, "stationary.xlsx"))
 
     def orca5_to_pd(self, orca5_objs):
         """
         Combine information from all the Orca 5 objects into a pd dataframe
-
+        TODO: Warning to txt file
         :param orca5_objs:
         :type orca5_objs: [Orca5]
         :return:
@@ -129,12 +156,36 @@ class Orca5Processor:
         print("\n-------------------------------Displaying warnings detected------------------------------------------")
         for key in self.folders_to_orca5:
             print(f"Source folder: {key}")
-            for item in self.folders_to_orca5[key]:
-                print(f"{item.input_name} --- Warnings: {item.warnings}")
+            try:
+                for item in self.folders_to_orca5[key]:
+                    print(f"{item.input_name} --- Warnings: {item.warnings}")
+            except TypeError:
+                raise TypeError(f"{key} is problematic")
             print()
         print("---------------------------------END of warning(s) section---------------------------------------------")
 
+    def remove_incomplete_job(self, delete_incomplete_job):
+        """
+
+        :param delete_incomplete_job: delete the file that corresponds to the incomplete Orca 5 job
+        :type delete_incomplete_job: bool
+        :return:
+        :rtype:
+        """
+
+        for key in self.folders_to_orca5:
+            idx_of_complete_job = []
+            for idx, obj in enumerate(self.folders_to_orca5[key]):
+                if not obj.completed_job:
+                    if delete_incomplete_job:
+                        to_be_removed = Path(obj.output_path)
+                        print(f"Deleting {to_be_removed.resolve()}")
+                        to_be_removed.unlink()
+                else:
+                    idx_of_complete_job.append(idx)
+            self.folders_to_orca5[key] = [self.folders_to_orca5[key][i] for i in idx_of_complete_job]
+
 
 if __name__ == "__main__":
-    root_ = r"E:\TEST\Orca5Processor_tests\YZQ"
-    orca5_ojbs = Orca5Processor(root_, display_warning=True, post_process_type="stationary")
+    root_ = r"E:\TEMP\YZQ\r2SCAN_GFN2\CREST1_Step2_TS_S\ALPB-GFN2_r2SCAN-3c"
+    orca5_ojbs = Orca5Processor(root_, display_warning=True, post_process_type="stationary", delete_incomplete_job=True)
