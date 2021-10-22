@@ -9,6 +9,7 @@ from os import listdir, path
 from pathlib import Path
 
 """
+Each valid Orca 5 output is converted into an Orca5 object
 Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN training
 """
 # TODO Slow reading in some cases!
@@ -23,7 +24,7 @@ class Orca5Processor:
                  display_warning=False,
                  delete_incomplete_job=False
                  ):
-
+        self.root_folder_path = root_folder_path
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
         self.orca5_in_pd = []
         # Get all the folders within the root
@@ -51,7 +52,9 @@ class Orca5Processor:
             else:
                 self.folders_to_orca5[folder] = []
                 for out_file in output_files:
+                    time_temp = time.perf_counter()
                     self.folders_to_orca5[folder].append(Orca5(out_file))
+                    print(f"{out_file} took {time.perf_counter()-time_temp:.2f} s")
             time_end = time.perf_counter()
             print(f"DONE in {time_end-time_start:.2f} sec")
 
@@ -61,86 +64,19 @@ class Orca5Processor:
         if display_warning:
             self.display_warning()
 
-        if post_process_type.lower() == "stationary":
-            # Check if all the folders have the same number of orca5 object
-            ref_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
-            for key in self.folders_to_orca5:
-                ref_objs[key] = []
-                no_of_opt = 0
-                temp_obj_lists_ = self.folders_to_orca5[key]
-                for obj in temp_obj_lists_:
-                    if "OPT" in obj.job_type_objs:
-                        if len(ref_objs[key]) == 1:
-                            # Check if the OPT object structure is the same as the current one
-                            rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                            if rmsd_ > 1e-5:
-                                ref_objs[key].append(obj)
-                        else:
-                            ref_objs[key].append(obj)
+        if "grad_cut_off" in post_process_type:
+            grad_cut_off = post_process_type["grad_cut_off"]
+        else:
+            grad_cut_off = 1e-5
 
-                    elif "FREQ" in obj.job_type_objs:
-                        if obj.job_type_objs["FREQ"].neligible_gradient:
-                            ref_objs[key].append(obj)
-                        else:
-                            orig_cut_off = obj.job_type_objs["SP"].gradients_cut_off
-                            loosen_cut_off = orig_cut_off * 10.0
-                            diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
-                            if np.any(diff_wrt_ref < 0.0):
-                                max_grad = np.max(obj["SP"].gradients)
-                                print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
-                            else:
-                                print(f"Loosen cut-off from {orig_cut_off:.2E} to {loosen_cut_off:.2E}"
-                                      f" - successful - Adding {obj.input_name}")
-                                ref_objs[key].append(obj)
-                                obj.job_type_objs["FREQ"].neligible_gradient = True
+        for key in post_process_type:
+            if key.lower() == "stationary":
+                self.process_stationary_pts(post_process_type[key], grad_cut_off=grad_cut_off)
+            elif key.lower() == "single points":
+                print()
 
-                assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
-
-            for key in self.folders_to_orca5:
-                self.orca5_to_pd(self.folders_to_orca5[key])
-
-            # All SP structures must be consistent with the structure in the reference obj
-            sp_objs: Dict[str, List[Orca5]] = {}
-            for key in self.folders_to_orca5:
-                sp_objs[key] = []
-                temp_obj_lists_ = self.folders_to_orca5[key]
-                for obj in temp_obj_lists_:
-                    if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
-                        # TODO We will assume that this is a SP for now
-                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                        if rmsd_ < 5e-6:
-                            sp_objs[key].append(obj)
-
-            # Collect the self.labelled_data and make the pandas df
-            labeled_data: Dict[str, Dict[str, str]] = {}
-            row_labels = []
-            counter = 0
-            thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
-            for key in ref_objs:
-                labeled_data[key] = ref_objs[key][0].labelled_data
-                for obj_ in sp_objs[key]:
-                    thermo_corr_sp = {}
-                    corr = 0.0
-                    # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
-                    labeled_data[key] = {**labeled_data[key], **obj_.labelled_data}
-                    for item in ref_objs[key][0].labelled_data:
-                        opt_theory, thermo_corr_type = item.split("--")
-                        if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
-                            for sp_key in obj_.labelled_data:
-                                try:
-                                    corr += ref_objs[key][0].labelled_data[item]
-                                    corr_value = obj_.labelled_data[sp_key] + corr
-                                    thermo_corr_sp[f"{thermo_corr_type} -- {sp_key}//{opt_theory}"] = corr_value
-                                except TypeError:
-                                    raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
-                    labeled_data[key] = {**labeled_data[key], **thermo_corr_sp}
-                if counter == 0:
-                    row_labels = list(labeled_data[key].keys())
-                    counter += 1
-            combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
-            combined_df.to_excel(path.join(root_folder_path, "stationary.xlsx"))
-
-    def orca5_to_pd(self, orca5_objs):
+    @staticmethod
+    def orca5_to_pd(orca5_objs, temperature=298.15):
         """
         Combine information from all the Orca 5 objects into a pd dataframe
         TODO: Warning to txt file
@@ -150,7 +86,7 @@ class Orca5Processor:
         :rtype:
         """
         for item in orca5_objs:
-            item.create_labelled_data()
+            item.create_labelled_data(temperature=temperature)
 
     def display_warning(self):
         print("\n-------------------------------Displaying warnings detected------------------------------------------")
@@ -185,7 +121,167 @@ class Orca5Processor:
                     idx_of_complete_job.append(idx)
             self.folders_to_orca5[key] = [self.folders_to_orca5[key][i] for i in idx_of_complete_job]
 
+    def process_stationary_pts(self, temperature=298.15, grad_cut_off=1e-5):
+        """
+        TODO Streamline gradient check?
+        :param temperature:
+        :type temperature: float
+        :param grad_cut_off:
+        :type grad_cut_off: float
+        :return:
+        :rtype:
+        """
+        # Check if all the folders have the same number of orca5 object
+        ref_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
+
+        self.merge_thermo(temperature=temperature, grad_cut_off=grad_cut_off)
+
+        for key in self.folders_to_orca5:
+            ref_objs[key] = []
+            no_of_opt = 0
+            temp_obj_lists_ = self.folders_to_orca5[key]
+            for obj in temp_obj_lists_:
+                if "OPT" in obj.job_type_objs and "FREQ" in obj.job_type_objs:
+                    if len(ref_objs[key]) == 1:
+                        # Check if the OPT object structure is the same as the current one
+                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                        if rmsd_ > 1e-5:
+                            ref_objs[key].append(obj)
+                    else:
+                        ref_objs[key].append(obj)
+
+                elif "FREQ" in obj.job_type_objs:
+                    if obj.job_type_objs["FREQ"].neligible_gradient:
+                        ref_objs[key].append(obj)
+                    else:
+                        orig_cut_off = obj.job_type_objs["SP"].gradients_cut_off
+                        loosen_cut_off = orig_cut_off * 10.0
+                        diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
+                        if np.any(diff_wrt_ref < 0.0):
+                            max_grad = np.max(obj["SP"].gradients)
+                            print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
+                        else:
+                            print(f"Loosen cut-off from {orig_cut_off:.2E} to {loosen_cut_off:.2E}"
+                                  f" - successful - Adding {obj.input_name}")
+                            ref_objs[key].append(obj)
+                            obj.job_type_objs["FREQ"].neligible_gradient = True
+
+            assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
+
+        for key in self.folders_to_orca5:
+            self.orca5_to_pd(self.folders_to_orca5[key], temperature=temperature)
+
+        # All SP structures must be consistent with the structure in the reference obj
+        sp_objs: Dict[str, List[Orca5]] = {}
+        for key in self.folders_to_orca5:
+            sp_objs[key] = []
+            temp_obj_lists_ = self.folders_to_orca5[key]
+            for obj in temp_obj_lists_:
+                if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
+                    # TODO We will assume that this is a SP for now
+                    rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                    if rmsd_ < grad_cut_off:
+                        sp_objs[key].append(obj)
+
+        # Collect the self.labelled_data and make the pandas df
+        labeled_data: Dict[str, Dict[str, str]] = {}
+        row_labels = []
+        counter = 0
+        thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
+        for key in ref_objs:
+            labeled_data[key] = ref_objs[key][0].labelled_data
+            for obj_ in sp_objs[key]:
+                thermo_corr_sp = {}
+                corr = 0.0
+                # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
+                labeled_data[key] = {**labeled_data[key], **obj_.labelled_data}
+                for item in ref_objs[key][0].labelled_data:
+                    opt_theory, thermo_corr_type = item.split("--")
+                    if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
+                        for sp_key in obj_.labelled_data:
+                            try:
+                                corr += ref_objs[key][0].labelled_data[item]
+                                corr_value = obj_.labelled_data[sp_key] + corr
+                                thermo_corr_sp[f"{thermo_corr_type} -- {sp_key}//{opt_theory}"] = corr_value
+                            except TypeError:
+                                raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
+                labeled_data[key] = {**labeled_data[key], **thermo_corr_sp}
+            if counter == 0:
+                row_labels = list(labeled_data[key].keys())
+                counter += 1
+        combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
+        combined_df.to_excel(path.join(self.root_folder_path, "stationary.xlsx"))
+
+    def merge_thermo(self, temperature=298.15, grad_cut_off=1e-5):
+        """
+        Merge and delete Orca5 that belongs to a printthermochem job with Orca5 from a Freq or Opt+Freq job
+        :param temperature: the required temperature
+        :type temperature: float
+        :param grad_cut_off: A manual gradient cut-off for SP gradient
+        :type grad_cut_off: float
+        :return:
+        :rtype:
+        """
+        for key in self.folders_to_orca5:
+            ref_objs:List[Orca5] = []
+            # Find the reference object
+            for orca5_obj in self.folders_to_orca5[key]:
+                if "FREQ" in orca5_obj.job_type_objs:
+                    if "OPT" in orca5_obj.job_type_objs or orca5_obj.job_type_objs["FREQ"].neligible_gradient:
+                        if not orca5_obj.method.is_print_thermo:
+                            ref_objs.append(orca5_obj)
+                    elif not orca5_obj.job_type_objs["FREQ"].neligible_gradient:
+                        diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
+                        if np.any(diff_wrt_ref < 0.0):
+                            print(f"Max gradient is above loosen cut-off={grad_cut_off:.5E} ... termininating")
+                        else:
+                            ref_objs.append(orca5_obj)
+
+            assert len(ref_objs) != 0, f"We cannot find a valid Orca 5 object with a valid FREQ " \
+                                       f"or OPT+FREQ job for {key}!"
+            orca5_obj_to_exclude = []
+
+            for idx, print_thermo_obj in enumerate(self.folders_to_orca5[key]):
+                if print_thermo_obj.method.is_print_thermo:
+                    orca5_obj_to_exclude.append(idx)
+                    for ref_obj in ref_objs:
+                        temp_ = print_thermo_obj.job_type_objs["FREQ"]
+                        elec_energy = ref_obj.job_type_objs["FREQ"].elec_energy
+                        zpe_corr_energy = elec_energy + temp_.thermo_data[temperature]["zero point energy"]
+                        total_thermal_energy = zpe_corr_energy + \
+                                               temp_.thermo_data[temperature]["total thermal correction"]
+                        total_enthalpy = total_thermal_energy + \
+                                         temp_.thermo_data[temperature]["thermal Enthalpy correction"]
+                        final_gibbs_free_energy = total_enthalpy + \
+                                                  temp_.thermo_data[temperature]["total entropy correction"]
+
+                        ref_obj_thermo_data = ref_obj.job_type_objs["FREQ"].thermo_data
+                        assert temperature not in ref_obj_thermo_data, f"The requested temperature is already present!"
+                        ref_obj_thermo_data[temperature] = {}
+                        ref_obj_thermo_data[temperature]["zero point energy"] = \
+                            temp_.thermo_data[temperature]["zero point energy"]
+                        ref_obj_thermo_data[temperature]["total thermal correction"] = \
+                            temp_.thermo_data[temperature]["total thermal correction"]
+                        ref_obj_thermo_data[temperature]["thermal Enthalpy correction"] = \
+                            temp_.thermo_data[temperature]["thermal Enthalpy correction"]
+                        ref_obj_thermo_data[temperature]["total entropy correction"] = \
+                            temp_.thermo_data[temperature]["total entropy correction"]
+
+                        ref_obj_thermo_data[temperature]["total thermal energy"] = total_thermal_energy
+                        ref_obj_thermo_data[temperature]["total enthalpy"] = total_enthalpy
+                        ref_obj_thermo_data[temperature]["final gibbs free energy"] = final_gibbs_free_energy
+
+            req_orca5_objs = []
+
+            for i in range(len(self.folders_to_orca5[key])):
+                if i not in orca5_obj_to_exclude:
+                    req_orca5_objs.append(self.folders_to_orca5[key][i])
+
+            self.folders_to_orca5[key] = req_orca5_objs
+
 
 if __name__ == "__main__":
-    root_ = r"E:\TEMP\YZQ\r2SCAN_GFN2\CREST1_Step2_TS_S\ALPB-GFN2_r2SCAN-3c"
-    orca5_ojbs = Orca5Processor(root_, display_warning=True, post_process_type="stationary", delete_incomplete_job=True)
+    root_ = r"E:\TEMP\YZQ\r2SCAN_GFN2\YZQ_step1_TS\CREST1_step1_TS\ALPB-GFN2_r2scan-3c"
+    orca5_ojbs = Orca5Processor(root_, display_warning=True,
+                                post_process_type={"stationary": 253.15, "grad_cut_off": 1e-4},
+                                delete_incomplete_job=True)

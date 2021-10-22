@@ -3,6 +3,7 @@ from rmsd import reorder_inertia_hungarian, rmsd
 from os import path
 from typing import Dict, List
 import numpy as np
+import time
 from ase import Atoms
 from ase.io import read
 from pathlib import Path
@@ -74,11 +75,17 @@ class Orca5:
             self.keywords, self.coord_spec, self.input_name = \
                 get_orca5_keywords(lines[self.input_section["start"]: self.input_section["end"]])
 
+            self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
+
+            self.determine_jobtype()
+            self.parse_orca5_output(lines[self.input_section["end"]:])
+            self.get_level_of_theory()
+
             if self.coord_spec["coord_type"] == "xyzfile":
                 found_xyzfile = False
                 temp_path = path.join(self.root_path, self.coord_spec["coord_path"])
                 from_root = None
-                if Path(temp_path).is_file():
+                if Path(temp_path).is_file() and "OPT" not in self.job_types:
                     found_xyzfile = True
                     self.geo_from_xyz = read(temp_path)
                 else:
@@ -90,13 +97,10 @@ class Orca5:
                         found_xyzfile = True
                 assert found_xyzfile, f"Sorry, we can't find {temp_path} or {from_root.resolve()}"
 
-            self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
-
-            self.determine_jobtype()
-            self.parse_orca5_output(lines[self.input_section["end"]:])
-            self.get_level_of_theory()
             # compare the geometry from output and from xyzfile if necessary
-            if self.geo_from_xyz is not None and not self.method.is_qmmm:
+            if self.geo_from_xyz is not None and \
+                    not self.method.is_qmmm and \
+                    not self.method.is_print_thermo:
                 # TODO check the QM atoms with the corresponding atom in the xyzfile
                 rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
                 if rmsd_ > 1e-5:
@@ -197,7 +201,7 @@ class Orca5:
         elif "OPTTS" in self.keywords["simple"]:
             self.job_types.append("OPT")
 
-        if "FREQ" in self.keywords["simple"]:
+        if "FREQ" in self.keywords["simple"] or "PRINTTHERMOCHEM" in self.keywords["simple"]:
             self.job_types.append("FREQ")
         elif "ANFREQ" in self.keywords["simple"]:
             self.job_types.append("ANFREQ")
@@ -305,6 +309,9 @@ class Orca5:
                     else:
                         self.job_type_objs["FREQ"] = self.keywords["FREQ"]
 
+                    if "PRINTTHERMOCHEM" in self.keywords["simple"]:
+                        self.method.is_print_thermo = True
+
                 elif item == "CPCM":
                     if "CPCM" not in self.keywords:
                         self.keywords["CPCM"] = Cpcm(solvent)
@@ -343,7 +350,7 @@ class Orca5:
 
         self.level_of_theory = level_of_theory
 
-    def create_labelled_data(self):
+    def create_labelled_data(self, temperature=298.15):
         """
 
         :return:
@@ -355,22 +362,24 @@ class Orca5:
 
         if "FREQ" in self.job_type_objs.keys():
             if "OPT" in self.job_type_objs.keys() or self.job_type_objs["FREQ"].neligible_gradient:
-                thermochemistry[self.level_of_theory + "--ZPE"] = self.job_type_objs["FREQ"].zero_pt_energy
-                thermochemistry[self.level_of_theory + "--thermal"] = \
-                    self.job_type_objs["FREQ"].total_thermal_correction
-                thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
-                    self.job_type_objs["FREQ"].thermal_enthalpy_correction
-                thermochemistry[self.level_of_theory + "--final_entropy_term"] = \
-                    self.job_type_objs["FREQ"].final_entropy_term
-                thermochemistry[self.level_of_theory + "--elec_energy"] = \
-                    self.job_type_objs["FREQ"].elec_energy
-                thermochemistry[self.level_of_theory + "--total_thermal_energy"] = \
-                    self.job_type_objs["FREQ"].total_thermal_energy
-                thermochemistry[self.level_of_theory + "--total_enthalpy"] = \
-                    self.job_type_objs["FREQ"].total_enthalpy
-                thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
-                    self.job_type_objs["FREQ"].final_gibbs_free_energy
-                self.labelled_data = {**self.labelled_data, **thermochemistry}
+                if temperature in self.job_type_objs["FREQ"].thermo_data:
+                    temp_ = self.job_type_objs["FREQ"].thermo_data[temperature]
+                    thermochemistry[self.level_of_theory + "--ZPE"] = temp_["zero point energy"]
+                    thermochemistry[self.level_of_theory + "--thermal"] = temp_["total thermal correction"]
+                    thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
+                        temp_["thermal Enthalpy correction"]
+                    thermochemistry[self.level_of_theory + "--final_entropy_term"] = temp_["total entropy correction"]
+                    thermochemistry[self.level_of_theory + "--elec_energy"] = \
+                        self.job_type_objs["FREQ"].elec_energy
+                    thermochemistry[self.level_of_theory + "--total_thermal_energy"] = temp_["total thermal energy"]
+                    thermochemistry[self.level_of_theory + "--total_enthalpy"] = temp_["total enthalpy"]
+                    thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
+                        temp_["final gibbs free energy"]
+                    self.labelled_data = {**self.labelled_data, **thermochemistry}
+                else:
+                    temp_ = self.job_type_objs["FREQ"].thermo_data
+                    raise ValueError(f"We cannot find {temperature} in {temp_}")
+
         elif "SP" in self.job_type_objs.keys():
             if "OPT" not in self.job_type_objs.keys() and "FREQ" not in self.job_type_objs.keys():
                 single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
@@ -440,6 +449,7 @@ class Method:
         self.single_value_int = ()
         self.multi_values = ()  # Multi_values keywords required an "end" to terminate
         self.is_qmmm = False
+        self.is_print_thermo = False
         self.cpcm = cpcm
 
 
@@ -585,7 +595,17 @@ class Geom:
         elements_seq = ""
         cart_coords = []
 
-        for line in lines_:
+        req_idx = -1
+
+        # In case of a OPT+FREQ, the
+        for i in range(len(lines_) - 1, 0, -1):
+            if "THE OPTIMIZATION HAS CONVERGED" in lines_[i]:
+                req_idx = i
+                break
+
+        assert req_idx > 0, f"Invalid Orca 5 FREQ output file detected!"
+
+        for line in lines_[req_idx:]:
             # Read cartesian coordinates if start_to_read_xyz == 2
             if start_to_read_xyz == 2:
                 try:
@@ -598,7 +618,7 @@ class Geom:
                     n_atoms += 1
                 except ValueError:
                     if start_to_read_failed_attempt == 2:
-                        start_to_read_xyz += 1
+                        break
                     else:
                         start_to_read_failed_attempt += 1
                     continue
@@ -651,6 +671,7 @@ class Freq:
         self.multi_values = ("hybrid_hess", "t")
 
         # Calculation's result
+        self.thermo_data: Dict[float, Dict[str, float]] = {}
         self.temp = None
         self.pressure = None
         self.total_mass = None
@@ -683,7 +704,7 @@ class Freq:
         start_to_read_freq = False
         start_to_read_thermo = False
         freq_read = False
-
+        thermo_check = 0  # Check the number of thermochemistry data read
         # 1: found the line "CARTESIAN COORDINATES (ANGSTROEM)"
         # 2: found the ilne : ------------------
         start_geometry_from_single_point = 0
@@ -697,7 +718,25 @@ class Freq:
             successful_opt = True
             geometry_from_single_point = True
 
-        for line in lines_:
+        req_idx = -1
+
+        # In case of a OPT+FREQ, the
+        for i in range(len(lines_) - 1, 0, -1):
+            if "THE OPTIMIZATION HAS CONVERGED" in lines_[i]:
+                req_idx = i
+                break
+
+        if req_idx < 0:
+            for i in range(len(lines_) - 1, 0, -1):
+                if "CARTESIAN COORDINATES (ANGSTROEM)" in lines_[i]:
+                    # This is not a OPT+FREQ
+                    req_idx = i
+                    break
+
+        assert req_idx > 0, f"Invalid Orca 5 FREQ output file detected!"
+
+        for idx, line in enumerate(lines_[req_idx:]):
+
             if "THE OPTIMIZATION HAS CONVERGED" in line:
                 successful_opt = True
                 continue
@@ -709,6 +748,9 @@ class Freq:
                 continue
             if "CARTESIAN COORDINATES (ANGSTROEM)" in line:
                 start_geometry_from_single_point += 1
+                continue
+            if thermo_check == 11:
+                start_to_read_thermo = False
 
             if start_to_read_freq and "cm**-1" in line:
                 try:
@@ -725,49 +767,58 @@ class Freq:
                 if "Temperature         ..." in line:
                     try:
                         self.temp = float(line.split()[2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the temperature at the expected index")
                 elif "Pressure            ..." in line:
                     try:
                         self.pressure = float(line.split()[2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the pressure at the expected index")
                 elif "Total Mass          ..." in line:
                     try:
                         self.total_mass = float(line.split()[-2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the total mass at the expected index")
                 elif "Electronic energy                ..." in line:
                     try:
                         self.elec_energy = float(line.split()[-2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the electronic energy at the expected index")
                 elif "Zero point energy                ..." in line:
                     try:
                         self.zero_pt_energy = float(line.split()[-4])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the zero point energy at the expected index")
                 elif "Total thermal correction" in line:
                     try:
                         self.total_thermal_correction = float(line.split()[-4])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the total thermal correction"
                                          f" at the expected index")
                 elif "Total thermal energy" in line:
                     try:
                         self.total_thermal_energy = float(line.split()[-2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the total thermal energy"
                                          f" at the expected index")
                 elif "Thermal Enthalpy correction       ..." in line:
                     try:
                         self.thermal_enthalpy_correction = float(line.split()[-4])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the thermal enthalpy correction"
                                          f" at the expected index")
                 elif "Total Enthalpy                    ..." in line:
                     try:
                         self.total_enthalpy = float(line.split()[-2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the total enthalpy"
                                          f" at the expected index")
@@ -775,12 +826,14 @@ class Freq:
                     # The final entropy term in ORCA 5 needs to be multiply by -1
                     try:
                         self.final_entropy_term = float(line.split()[-4])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the final entropy term"
                                          f" at the expected index")
                 elif "Final Gibbs free energy         ..." in line:
                     try:
                         self.final_gibbs_free_energy = float(line.split()[-2])
+                        thermo_check += 1
                     except ValueError:
                         raise ValueError(f"{line} -- does not contain the final Gibbs free energy"
                                          f" at the expected index")
@@ -798,6 +851,16 @@ class Freq:
                         start_geometry_from_single_point = 0
                         self.geo_from_output = Atoms(elements_seq, positions=np.array(coordinates))
                         continue
+
+            elif thermo_check == 11:
+                thermo_check += 1
+                self.thermo_data[self.temp] = {"zero point energy": self.zero_pt_energy,
+                                               "total thermal correction": self.total_thermal_correction,
+                                               "thermal Enthalpy correction": self.thermal_enthalpy_correction,
+                                               "total entropy correction": self.final_entropy_term,
+                                               "total thermal energy": self.total_thermal_energy,
+                                               "total enthalpy": self.total_enthalpy,
+                                               "final gibbs free energy": self.final_gibbs_free_energy}
 
 
 class Scf:
@@ -897,9 +960,9 @@ class Scf:
 
 
 class Qmmm:
-    def __init__(self):
+    def __init__(self, qm_spec=None, qm_charge=0, qm_multiplicity=1, total_charge=0, total_multiplicity=1):
         self.name = "qmmm"
-        self.keywords = {"qmatoms:": None, "charge_total": 0, "multi_total": 1,
+        self.keywords = {"qmatoms:": None, "charge_total": total_charge, "multi_total": total_multiplicity,
                          "qm2custommethod": None, "qm2custombasis": None, "qm2customfile": None}
 
         self.single_value_str = ("qm2custommethod", "qm2custombasis", "qm2customfile")
@@ -907,10 +970,54 @@ class Qmmm:
         self.single_value_int = ("charge_total", "multi_total")
         # Multi_values keywords required an "end" to terminate
         self.multi_values = ("qmatoms")
+
+        if qm_spec is not None:
+            self.keywords["qmatoms"] = qm_spec
+            self.keywords["charge_total"] = total_charge
+            self.keywords["multi_total"] = total_multiplicity
+
+    def write_qmmm_inp(self, inp_path):
+        """
+
+        :return:
+        :rtype:
+        """
+        qm_atoms = self.keywords["qmatoms"]
+        total_charge = self.keywords["charge_total"]
+        mult_total = self.keywords["multi_total"]
+        to_be_written = f"%qmmm\n    QMAtoms {qm_atoms} end\n    " \
+                        f"Charge_Total {total_charge}\n    " \
+                        f"mult_total {mult_total}\n" \
+                        f"end"
+
+        with open(inp_path, "w") as f:
+            f.writelines(to_be_written)
+
 # END of classes related to detailed keyword---------------------------------------------------------------------------
 
 
 # Independent function collections
+def reorder_atoms(atoms_p, atoms_q):
+    """
+
+    :param atoms_p:
+    :type atoms_p: Atoms
+    :param atoms_q:
+    :type atoms_q: Atoms
+    :return:
+    :rtype:
+    """
+    p_elements = np.array(atoms_p.get_chemical_symbols())
+    q_elements = np.array(atoms_q.get_chemical_symbols())
+    p_coords = np.array(atoms_p.get_positions())
+    q_coords = np.array(atoms_q.get_positions())
+    assert p_coords.shape == q_coords.shape, f"Sorry, no point comparing two molecules of different number of atoms. " \
+                                             f"atoms_p:{p_coords.shape} and atoms_q:{q_coords.shape}"
+
+    q_review = reorder_inertia_hungarian(p_elements, q_elements, p_coords, q_coords)
+    return q_review
+
+
 def calc_rmsd_ase_atoms_non_pbs(atoms_p, atoms_q):
     """
     Compare two ASE Atoms object and calculate its rmsd
@@ -931,6 +1038,24 @@ def calc_rmsd_ase_atoms_non_pbs(atoms_p, atoms_q):
     q_review = reorder_inertia_hungarian(p_elements, q_elements, p_coords, q_coords)
     q_coords = q_coords[q_review]
     return rmsd(p_coords, q_coords)
+
+
+def calc_rmsd_ase_multi_atoms(some_atoms_objs: [List]):
+    """
+
+    :param some_atoms_objs:
+    :type some_atoms_objs:
+    :return: a matrix of RMSD
+    :rtype: np.array
+    """
+    n_objs = len(some_atoms_objs)
+    req_indices = np.triu_indices(n_objs, 1)
+    rmsd_matrix = np.zeros((n_objs, n_objs))
+
+    for i, j in np.transpose(req_indices):
+        rmsd_matrix[i, j] = calc_rmsd_ase_atoms_non_pbs(some_atoms_objs[i], some_atoms_objs[j])
+
+    return rmsd_matrix
 
 
 def get_orca5_keywords(lines_):
