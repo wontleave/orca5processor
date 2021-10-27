@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import json
 import pickle
+import argparse
 from typing import Dict, List
 from orca5_utils import calc_rmsd_ase_atoms_non_pbs
 from reading_utilis import read_root_folders
@@ -124,17 +125,29 @@ class Orca5Processor:
         :rtype:
         """
 
+        empty_folders = []
         for key in self.folders_to_orca5:
             idx_of_complete_job = []
-            for idx, obj in enumerate(self.folders_to_orca5[key]):
-                if not obj.completed_job:
-                    if delete_incomplete_job:
-                        to_be_removed = Path(obj.output_path)
-                        print(f"Deleting {to_be_removed.resolve()}")
-                        to_be_removed.unlink()
-                else:
-                    idx_of_complete_job.append(idx)
-            self.folders_to_orca5[key] = [self.folders_to_orca5[key][i] for i in idx_of_complete_job]
+            try:
+                for idx, obj in enumerate(self.folders_to_orca5[key]):
+                    if not obj.completed_job:
+                        if delete_incomplete_job:
+                            to_be_removed = Path(obj.output_path)
+                            print(f"Deleting {to_be_removed.resolve()}")
+                            to_be_removed.unlink()
+                    else:
+                        idx_of_complete_job.append(idx)
+                self.folders_to_orca5[key] = [self.folders_to_orca5[key][i] for i in idx_of_complete_job]
+            except TypeError:
+                print(f"{key} does not contain any Orca 5 objects ... skipping")
+                empty_folders.append(key)
+
+        if len(empty_folders) > 0:
+            fixed_folders_to_orca5 = {}
+            for key in self.folders_to_orca5:
+                if key not in empty_folders:
+                    fixed_folders_to_orca5[key] = self.folders_to_orca5[key]
+            self.folders_to_orca5 = fixed_folders_to_orca5
 
     def process_single_pts(self, to_json=None, to_pickle=None, to_pinn=None, level_of_theory=None):
         """
@@ -343,12 +356,17 @@ class Orca5Processor:
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-r", "--root", help="Path of the root folder")
+
+    args = parser.parse_args()
     # root_ = r"E:\TEST\Orca5Processor_tests\YZQ\DEBUG"
-    root_ = r"E:\vBoxShared\PiNN_database\TCH_catalysts\YZQ-PNtBU-Steglich-Step1TS"
+    # root_ = r"E:\vBoxShared\PiNN_database\TCH_catalysts\YZQ-PNtBU-Steglich-Step1TS"
     # orca5_ojbs = Orca5Processor(root_, display_warning=True,
     #                             post_process_type={"stationary": 253.15, "grad_cut_off": 1e-4},
     #                             delete_incomplete_job=True)
 
-    orca5_objs = Orca5Processor(root_, post_process_type={"single point":
+    orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
                                                               {"to_pinn": ["pickle", "energy"],
                                                                "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
