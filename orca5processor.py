@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 import time
+import json
+import pickle
 from typing import Dict, List
 from orca5_utils import calc_rmsd_ase_atoms_non_pbs
 from reading_utilis import read_root_folders
@@ -12,6 +14,8 @@ from pathlib import Path
 Each valid Orca 5 output is converted into an Orca5 object
 Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN training
 """
+
+
 # TODO Slow reading in some cases!
 
 
@@ -19,6 +23,7 @@ class Orca5Processor:
     """
     Read a folder which contains a collection of ORCA5 jobs to create a list of ORCA5 object
     """
+
     def __init__(self, root_folder_path,
                  post_process_type=None,
                  display_warning=False,
@@ -54,9 +59,9 @@ class Orca5Processor:
                 for out_file in output_files:
                     time_temp = time.perf_counter()
                     self.folders_to_orca5[folder].append(Orca5(out_file))
-                    print(f"{out_file} took {time.perf_counter()-time_temp:.2f} s")
+                    print(f"{out_file} took {time.perf_counter() - time_temp:.2f} s")
             time_end = time.perf_counter()
-            print(f"DONE in {time_end-time_start:.2f} sec")
+            print(f"DONE in {time_end - time_start:.2f} sec")
 
         # Remove Orca 5 objects that are flagged as incomplete with option to delete the corresponding output file
         self.remove_incomplete_job(delete_incomplete_job)
@@ -72,8 +77,18 @@ class Orca5Processor:
         for key in post_process_type:
             if key.lower() == "stationary":
                 self.process_stationary_pts(post_process_type[key], grad_cut_off=grad_cut_off)
-            elif key.lower() == "single points":
-                print()
+            elif key.lower() == "single point":
+                if "to_pinn" in post_process_type[key]:
+                    to_pinn = post_process_type[key]["to_pinn"]
+                else:
+                    to_pinn = None
+
+                if "level_of_theory" in post_process_type[key]:
+                    lvl_of_theory = post_process_type[key]["level_of_theory"]
+                else:
+                    raise ValueError("Please specific the level of theory!")
+
+                self.process_single_pts(post_process_type[key], to_pinn=to_pinn, level_of_theory=lvl_of_theory)
 
     @staticmethod
     def orca5_to_pd(orca5_objs, temperature=298.15):
@@ -120,6 +135,52 @@ class Orca5Processor:
                 else:
                     idx_of_complete_job.append(idx)
             self.folders_to_orca5[key] = [self.folders_to_orca5[key][i] for i in idx_of_complete_job]
+
+    def process_single_pts(self, to_json=None, to_pickle=None, to_pinn=None, level_of_theory=None):
+        """
+
+        :param to_json:
+        :type to_json:
+        :param to_pickle:
+        :type to_pickle:
+        :param to_pinn: Output the objects into an ASE atoms + energy and/or forces for PiNN training in pickle
+        :type to_pinn: List[str]
+        :param level_of_theory: specific the level of theory for the single point calculation. All if None
+        :type level_of_theory: str
+        :return:
+        :rtype:
+        """
+        sp_objs: Dict[str, List[Orca5]] = {}
+        for key in self.folders_to_orca5:
+            sp_objs[key] = []
+            temp_obj_lists_ = self.folders_to_orca5[key]
+            for obj in temp_obj_lists_:
+                if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
+                    # TODO We will assume that this is a SP for now
+                    sp_objs[key].append(obj)
+
+        if to_pinn is not None:
+            pinn_tuples = []
+            get_forces = False
+            if "pickle" in to_pinn:
+                output_type = "pickle"
+            else:
+                raise ValueError("No valid output type!")
+
+            assert level_of_theory is not None, "You need to specific the level of theory!"
+            for key in sp_objs:
+                for obj_ in sp_objs[key]:
+                    if obj_.level_of_theory == level_of_theory:
+                        if get_forces:
+                            # TODO Engrad is not implemented yet
+                            temp_ = obj_.job_type_objs["ENGRAD"]
+                            pinn_tuples.append((temp_.geo_from_output, temp_.final_sp_energy, temp_.forces))
+                        else:
+                            temp_ = obj_.job_type_objs["SP"]
+                            pinn_tuples.append((temp_.geo_from_output, temp_.final_sp_energy))
+
+            if output_type == "pickle":
+                pickle.dump(pinn_tuples, open(path.join(self.root_folder_path, "sp_objs.pickle"), "wb"))
 
     def process_stationary_pts(self, temperature=298.15, grad_cut_off=1e-5):
         """
@@ -189,12 +250,13 @@ class Orca5Processor:
         counter = 0
         thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
         for key in ref_objs:
-            labeled_data[key] = ref_objs[key][0].labelled_data
+            key_from_base = path.basename(key)
+            labeled_data[key_from_base] = ref_objs[key][0].labelled_data
             for obj_ in sp_objs[key]:
                 thermo_corr_sp = {}
                 corr = 0.0
                 # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
-                labeled_data[key] = {**labeled_data[key], **obj_.labelled_data}
+                labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
                 for item in ref_objs[key][0].labelled_data:
                     opt_theory, thermo_corr_type = item.split("--")
                     if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
@@ -205,9 +267,9 @@ class Orca5Processor:
                                 thermo_corr_sp[f"{thermo_corr_type} -- {sp_key}//{opt_theory}"] = corr_value
                             except TypeError:
                                 raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
-                labeled_data[key] = {**labeled_data[key], **thermo_corr_sp}
+                labeled_data[key_from_base] = {**labeled_data[key_from_base], **thermo_corr_sp}
             if counter == 0:
-                row_labels = list(labeled_data[key].keys())
+                row_labels = list(labeled_data[key_from_base].keys())
                 counter += 1
         combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
         combined_df.to_excel(path.join(self.root_folder_path, "stationary.xlsx"))
@@ -223,7 +285,7 @@ class Orca5Processor:
         :rtype:
         """
         for key in self.folders_to_orca5:
-            ref_objs:List[Orca5] = []
+            ref_objs: List[Orca5] = []
             # Find the reference object
             for orca5_obj in self.folders_to_orca5[key]:
                 if "FREQ" in orca5_obj.job_type_objs:
@@ -281,7 +343,12 @@ class Orca5Processor:
 
 
 if __name__ == "__main__":
-    root_ = r"E:\TEMP\YZQ\r2SCAN_GFN2\YZQ_step1_TS\CREST1_step1_TS\ALPB-GFN2_r2scan-3c"
-    orca5_ojbs = Orca5Processor(root_, display_warning=True,
-                                post_process_type={"stationary": 253.15, "grad_cut_off": 1e-4},
-                                delete_incomplete_job=True)
+    # root_ = r"E:\TEST\Orca5Processor_tests\YZQ\DEBUG"
+    root_ = r"E:\vBoxShared\PiNN_database\TCH_catalysts\YZQ-PNtBU-Steglich-Step1TS"
+    # orca5_ojbs = Orca5Processor(root_, display_warning=True,
+    #                             post_process_type={"stationary": 253.15, "grad_cut_off": 1e-4},
+    #                             delete_incomplete_job=True)
+
+    orca5_objs = Orca5Processor(root_, post_process_type={"single point":
+                                                              {"to_pinn": ["pickle", "energy"],
+                                                               "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})

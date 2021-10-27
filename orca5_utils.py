@@ -9,10 +9,7 @@ from ase.io import read
 from pathlib import Path
 
 
-# TODO Add ALPB support
-# TODO Add ALPB and GFN2 to labelled data
 # TODO The key case can be very annoying now. Need to ADD an doc here for clarity on the use of CASE
-
 
 class Orca5:
     """
@@ -195,6 +192,7 @@ class Orca5:
         :return:
         :rtype:
         """
+        qmmm_lvl_of_theory = None
 
         if "OPT" in self.keywords["simple"]:
             self.job_types.append("OPT")
@@ -215,6 +213,8 @@ class Orca5:
 
         if "QM/XTB" in self.keywords["simple"]:
             self.job_types.append("QMMM")
+            qmmm_lvl_of_theory = "QM/XTB"
+
         # CPCM section
         solvent = None
         req_kw = None
@@ -225,7 +225,15 @@ class Orca5:
                 self.job_types.append("CPCM")
                 solvent = req_kw.string.split("(")[-1].strip(")")
                 sanity_check += 1
+
+            req_kw = re.search("ALPB", kw)
+            if req_kw is not None:
+                self.job_types.append("ALPB")
+                solvent = req_kw.string.split("(")[-1].strip(")")
+                sanity_check += 1
+
         assert sanity_check <= 1, f"You have {sanity_check} CPCM simple keyword in the ORCA5 input: "
+
         # This happens when there is no !CPCM(solvent) but there is %CPCM .... end
         if "CPCM" in self.keywords and "CPCM" not in self.job_types:
             self.job_types.append("CPCM")
@@ -315,15 +323,27 @@ class Orca5:
                 elif item == "CPCM":
                     if "CPCM" not in self.keywords:
                         self.keywords["CPCM"] = Cpcm(solvent)
-                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
 
+                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
                     self.method.cpcm = self.keywords["CPCM"]
+                    if self.job_type_objs["CPCM"].solvent == "":  # If %cpcm is detected solvent will be set to ""
+                        self.job_type_objs["CPCM"].solvent = solvent
+
+                elif item == "ALPB":
+                    if "CPCM" not in self.keywords:
+                        self.keywords["CPCM"] = Cpcm(solvent, name="ALPB")
+                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
+                    self.job_types.append("CPCM")
+                    self.method.cpcm = self.keywords["CPCM"]
+                    self.method.solvation = "ALPB"
 
                 elif item == "QMMM":
                     if "QMMM" not in self.keywords:
                         self.keywords["QMMM"] = Qmmm()
                     self.job_type_objs["QMMM"] = self.keywords["QMMM"]
                     self.method.is_qmmm = True
+                    if qmmm_lvl_of_theory is not None:
+                        self.job_type_objs["QMMM"].lvl_of_theory = qmmm_lvl_of_theory
 
     def get_level_of_theory(self):
         """
@@ -339,13 +359,21 @@ class Orca5:
             basis = self.basis.keywords["basis"]
             level_of_theory += f"/{basis}"
 
+        if "QMMM" in self.job_types:
+            if self.keywords["QMMM"].lvl_of_theory != "":
+                high_level, low_level = self.keywords["QMMM"].lvl_of_theory.split("/")
+                level_of_theory += f":{low_level}"
+
         if "CPCM" in self.job_types:
             if self.keywords["CPCM"].keywords["smd"].lower() == "true":
                 solvent = self.keywords["CPCM"].keywords["smdsolvent"]
                 level_of_theory = f"SMD({(solvent)})/" + level_of_theory
             else:
                 solvent = self.keywords["CPCM"].solvent
-                fepstype = self.keywords["CPCM"].keywords["fepstype"]
+                if self.keywords["CPCM"].name == "ALPB":
+                    fepstype = "ALPB"
+                else:
+                    fepstype = self.keywords["CPCM"].keywords["fepstype"]
                 level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
 
         self.level_of_theory = level_of_theory
@@ -385,7 +413,8 @@ class Orca5:
                 single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
                 self.labelled_data = {**self.labelled_data, **single_point}
 
-
+    def to_dict(self):
+        print()
 # ORCA5 simple keywords
 scf_conv_simple_keywords = ("NORMALSCF", "LOOSESCF", "SLOPPYSCF", "STRONGSCF", "TIGHTSCF", "VERYTIGHTSCF",
                             "EXTREMESCF", "SCFCONV")
@@ -450,7 +479,7 @@ class Method:
         self.multi_values = ()  # Multi_values keywords required an "end" to terminate
         self.is_qmmm = False
         self.is_print_thermo = False
-        self.cpcm = cpcm
+        self.solvation: str = ""
 
 
 class Basis:
@@ -504,11 +533,12 @@ class Basis:
 
 
 class Cpcm:
-    def __init__(self, solvent):
+    def __init__(self, solvent, name="cpcm"):
         """
         Solvation will be covered under Method
+        ALPB is currently under Cpcm
         """
-        self.name = "cpcm"
+        self.name = name
         self.detail_read = False  # CPCM details appear at every SCF cycle. This flag causes it to be read only once
         self.solvent = solvent  # The CPCM solvent
         self.keywords = {"epsilon": None, "refrac": None, "rsolv": None, "rmin": None, "pmin": None,
@@ -962,6 +992,7 @@ class Scf:
 class Qmmm:
     def __init__(self, qm_spec=None, qm_charge=0, qm_multiplicity=1, total_charge=0, total_multiplicity=1):
         self.name = "qmmm"
+        self.lvl_of_theory:str = ""
         self.keywords = {"qmatoms:": None, "charge_total": total_charge, "multi_total": total_multiplicity,
                          "qm2custommethod": None, "qm2custombasis": None, "qm2customfile": None}
 
@@ -1130,7 +1161,7 @@ def get_orca5_keywords(lines_):
                     keywords[current_detailed_kw.upper()] = Scf()
                 elif current_detailed_kw == "CPCM":
                     if current_detailed_kw.upper() not in keywords:
-                        keywords[current_detailed_kw.upper()] = Cpcm("SMD")
+                        keywords[current_detailed_kw.upper()] = Cpcm("")
                 else:
                     current_detailed_kw = None
         elif start_to_read_simple_kw:
