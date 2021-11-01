@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 # TODO The key case can be very annoying now. Need to ADD an doc here for clarity on the use of CASE
+# self.keywords key: lowercase. self.jobtype key: UPPERCASE
 
 class Orca5:
     """
@@ -235,7 +236,7 @@ class Orca5:
         assert sanity_check <= 1, f"You have {sanity_check} CPCM simple keyword in the ORCA5 input: "
 
         # This happens when there is no !CPCM(solvent) but there is %CPCM .... end
-        if "CPCM" in self.keywords and "CPCM" not in self.job_types:
+        if "cpcm" in self.keywords and "CPCM" not in self.job_types:
             self.job_types.append("CPCM")
 
         # Check if it is a single point
@@ -250,6 +251,13 @@ class Orca5:
                     if item.upper() in self.keywords["simple"]:
                         is_single_point = True
                         break
+                if "method" in self.keywords:
+                    # Maybe a custom single point
+                    if self.keywords["method"].keywords["functional"] is not None or \
+                            self.keywords["method"].keywords["exchange"] is not None or \
+                            self.keywords["method"].keywords["correlation"] is not None:
+                        is_single_point = True
+
             if not is_single_point:
                 self.job_types = None
             else:
@@ -271,10 +279,10 @@ class Orca5:
 
             if "SP" not in self.job_types:
                 self.job_types.append("SP")
-            if "SCF" not in self.keywords.keys():
+            if "scf" not in self.keywords.keys():
                 self.job_type_objs["SP"] = Scf()
             else:
-                self.job_type_objs["SP"] = self.keywords["SCF"]
+                self.job_type_objs["SP"] = self.keywords["scf"]
 
             for kw in scf_conv_simple_keywords:
                 if kw.upper() in self.keywords["simple"]:
@@ -300,47 +308,47 @@ class Orca5:
                     if "GEOM" not in self.keywords:
                         self.job_type_objs["OPT"] = Geom()
                     else:
-                        self.job_type_objs["OPT"] = self.keywords["GEOM"]
+                        self.job_type_objs["OPT"] = self.keywords["geom"]
 
                 elif item in ('FREQ', "ANFREQ", "NUMFREQ"):
                     if "OPT" not in self.job_types:
                         self.method = self.keywords["method"]
                         self.method.keywords["runtyp"] = "FREQ"
 
-                    if "FREQ" not in self.keywords:
-                        self.keywords["FREQ"] = Freq()
+                    if "freq" not in self.keywords:
+                        self.keywords["freq"] = Freq()
                         if item == "ANFREQ":
-                            self.keywords["FREQ"].keywords["anfreq"] = True
+                            self.keywords["freq"].keywords["anfreq"] = True
                         elif item == "NUMFREQ":
-                            self.keywords["FREQ"].keywords["numfreq"] = True
-                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
+                            self.keywords["freq"].keywords["numfreq"] = True
+                        self.job_type_objs["FREQ"] = self.keywords["freq"]
                     else:
-                        self.job_type_objs["FREQ"] = self.keywords["FREQ"]
+                        self.job_type_objs["FREQ"] = self.keywords["freq"]
 
                     if "PRINTTHERMOCHEM" in self.keywords["simple"]:
                         self.method.is_print_thermo = True
 
                 elif item == "CPCM":
-                    if "CPCM" not in self.keywords:
-                        self.keywords["CPCM"] = Cpcm(solvent)
+                    if "cpcm" not in self.keywords:
+                        self.keywords["cpcm"] = Cpcm(solvent)
 
-                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
-                    self.method.cpcm = self.keywords["CPCM"]
+                    self.job_type_objs["CPCM"] = self.keywords["cpcm"]
+                    self.method.cpcm = self.keywords["cpcm"]
                     if self.job_type_objs["CPCM"].solvent == "":  # If %cpcm is detected solvent will be set to ""
                         self.job_type_objs["CPCM"].solvent = solvent
 
                 elif item == "ALPB":
-                    if "CPCM" not in self.keywords:
-                        self.keywords["CPCM"] = Cpcm(solvent, name="ALPB")
-                    self.job_type_objs["CPCM"] = self.keywords["CPCM"]
+                    if "cpcm" not in self.keywords:
+                        self.keywords["cpcm"] = Cpcm(solvent, name="ALPB")
+                    self.job_type_objs["CPCM"] = self.keywords["cpcm"]
                     self.job_types.append("CPCM")
-                    self.method.cpcm = self.keywords["CPCM"]
+                    self.method.cpcm = self.keywords["cpcm"]
                     self.method.solvation = "ALPB"
 
                 elif item == "QMMM":
-                    if "QMMM" not in self.keywords:
-                        self.keywords["QMMM"] = Qmmm()
-                    self.job_type_objs["QMMM"] = self.keywords["QMMM"]
+                    if "qmmm" not in self.keywords:
+                        self.keywords["qmmm"] = Qmmm()
+                    self.job_type_objs["QMMM"] = self.keywords["qmmm"]
                     self.method.is_qmmm = True
                     if qmmm_lvl_of_theory is not None:
                         self.job_type_objs["QMMM"].lvl_of_theory = qmmm_lvl_of_theory
@@ -352,8 +360,24 @@ class Orca5:
         :rtype:
         """
         level_of_theory = ""
+        has_dft_exchange = False
+        has_dft_correlation = False
+
         if self.method.keywords["functional"] is not None:
             level_of_theory += self.method.keywords["functional"]
+        if self.method.keywords["exchange"] is not None:
+            level_of_theory += self.method.keywords["exchange"].split("_")[-1]
+            has_dft_exchange = True
+        if self.method.keywords["correlation"] is not None:
+            level_of_theory += self.method.keywords["correlation"].split("_")[-1]
+            has_dft_correlation = True
+
+        if has_dft_exchange and has_dft_correlation and "mp2" in self.keywords:
+            # Some custom double-hybrid functional
+            if self.keywords["mp2"].keywords["doscs"].lower() == "true":
+                level_of_theory = "DSD-" + level_of_theory
+            if self.keywords["mp2"].keywords["dlpno"].lower() == "true":
+                level_of_theory = "DLPNO-" + level_of_theory
 
         if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
             basis = self.basis.keywords["basis"]
@@ -365,15 +389,15 @@ class Orca5:
                 level_of_theory += f":{low_level}"
 
         if "CPCM" in self.job_types:
-            if self.keywords["CPCM"].keywords["smd"].lower() == "true":
-                solvent = self.keywords["CPCM"].keywords["smdsolvent"]
+            if self.keywords["cpcm"].keywords["smd"].lower() == "true":
+                solvent = self.keywords["cpcm"].keywords["smdsolvent"]
                 level_of_theory = f"SMD({(solvent)})/" + level_of_theory
             else:
-                solvent = self.keywords["CPCM"].solvent
-                if self.keywords["CPCM"].name == "ALPB":
+                solvent = self.keywords["cpcm"].solvent
+                if self.keywords["cpcm"].name == "ALPB":
                     fepstype = "ALPB"
                 else:
-                    fepstype = self.keywords["CPCM"].keywords["fepstype"]
+                    fepstype = self.keywords["cpcm"].keywords["fepstype"]
                 level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
 
         self.level_of_theory = level_of_theory
@@ -403,6 +427,11 @@ class Orca5:
                     thermochemistry[self.level_of_theory + "--total_enthalpy"] = temp_["total enthalpy"]
                     thermochemistry[self.level_of_theory + "--final_gibbs_free_energy"] = \
                         temp_["final gibbs free energy"]
+
+                    freqs_ = np.array(self.job_type_objs["FREQ"].frequencies)
+                    negative_freqs = freqs_[freqs_ < 0.0]
+                    thermochemistry["N Img Freq"] = np.count_nonzero(freqs_ < 0.0)
+                    thermochemistry["Negative Freqs"] = str(negative_freqs.tolist())
                     self.labelled_data = {**self.labelled_data, **thermochemistry}
                 else:
                     temp_ = self.job_type_objs["FREQ"].thermo_data
@@ -413,9 +442,8 @@ class Orca5:
                 single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
                 self.labelled_data = {**self.labelled_data, **single_point}
 
-    def to_dict(self):
-        print()
 # ORCA5 simple keywords
+
 scf_conv_simple_keywords = ("NORMALSCF", "LOOSESCF", "SLOPPYSCF", "STRONGSCF", "TIGHTSCF", "VERYTIGHTSCF",
                             "EXTREMESCF", "SCFCONV")
 
@@ -468,13 +496,16 @@ class Method:
         self.keywords = {"runtyp": run_type,
                          "functional": None, "exchange": None, "correlation": None,
                          "scalmp2c": None, "scalldac": None, "scalhfx": None,
+                         "scalggac": None, "scaldfx": None,
                          "method": None,
                          "mayer_bondorderthres": None,
-                         "ri": None
+                         "ri": None,
+                         "d3s6": None, "d3a2": None, "d3s8": None, "d3a1": None
                          }
 
         self.single_value_str = ("exchange", "correlation", "runtyp", "functional", "method", "ri")
-        self.single_value_float = ("mayer_bondorderthres", "scalmp2c", "scalldac", "scalhfx")
+        self.single_value_float = ("mayer_bondorderthres", "scalmp2c", "scalldac", "scalhfx", "scalggac", "scaldfx",
+                                   "d3s6", "d3a2", "d3s8", "d3a1")
         self.single_value_int = ()
         self.multi_values = ()  # Multi_values keywords required an "end" to terminate
         self.is_qmmm = False
@@ -1024,6 +1055,18 @@ class Qmmm:
         with open(inp_path, "w") as f:
             f.writelines(to_be_written)
 
+
+class Mp2:
+    def __init__(self):
+        self.name = "mp2"
+        self.keywords = {"doscs": None, "ps": None, "pt": None, "dlpno": None, "ri": None}
+
+        self.single_value_str = ("doscs", "dlpno", "qm2customfile", "ri")
+        self.single_value_float = ("ps", "pt")
+        self.single_value_int = ()
+        # Multi_values keywords required an "end" to terminate
+        self.multi_values = ()
+
 # END of classes related to detailed keyword---------------------------------------------------------------------------
 
 
@@ -1147,21 +1190,24 @@ def get_orca5_keywords(lines_):
 
         elif "%" in item:
             start_to_read_simple_kw = False
+            # keywords dictionary keys are in lowercase
             if current_detailed_kw is None:
-                current_detailed_kw = item.strip("%\n").upper()
-                if current_detailed_kw == "METHOD":
-                    keywords[current_detailed_kw.upper()] = Method()
-                elif current_detailed_kw == "GEOM":
-                    keywords[current_detailed_kw.upper()] = Geom()
-                elif current_detailed_kw == "MTR":
-                    keywords[current_detailed_kw.upper()] = Mtr()
-                elif current_detailed_kw == "FREQ":
-                    keywords[current_detailed_kw.upper()] = Freq()
-                elif current_detailed_kw == "SCF":
-                    keywords[current_detailed_kw.upper()] = Scf()
-                elif current_detailed_kw == "CPCM":
-                    if current_detailed_kw.upper() not in keywords:
-                        keywords[current_detailed_kw.upper()] = Cpcm("")
+                current_detailed_kw = item.strip("%\n").lower()
+                if current_detailed_kw == "method":
+                    keywords[current_detailed_kw] = Method()
+                elif current_detailed_kw == "geom":
+                    keywords[current_detailed_kw] = Geom()
+                elif current_detailed_kw == "mtr":
+                    keywords[current_detailed_kw] = Mtr()
+                elif current_detailed_kw == "freq":
+                    keywords[current_detailed_kw] = Freq()
+                elif current_detailed_kw == "scf":
+                    keywords[current_detailed_kw] = Scf()
+                elif current_detailed_kw == "cpcm":
+                    if current_detailed_kw not in keywords:
+                        keywords[current_detailed_kw] = Cpcm("")
+                elif current_detailed_kw == "mp2":
+                    keywords[current_detailed_kw] = Mp2()
                 else:
                     current_detailed_kw = None
         elif start_to_read_simple_kw:

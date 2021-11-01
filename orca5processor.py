@@ -18,7 +18,7 @@ Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN
 
 
 # TODO Slow reading in some cases!
-
+# TODO
 
 class Orca5Processor:
     """
@@ -70,14 +70,19 @@ class Orca5Processor:
         if display_warning:
             self.display_warning()
 
-        if "grad_cut_off" in post_process_type:
-            grad_cut_off = post_process_type["grad_cut_off"]
-        else:
-            grad_cut_off = 1e-5
-
         for key in post_process_type:
+            if "grad_cut_off" in post_process_type[key]:
+                grad_cut_off = float(post_process_type[key]["grad_cut_off"][0])  # value is a list.
+            else:
+                grad_cut_off = 1e-5
+
+            if "temperature" in post_process_type[key]:
+                temperature_ = float(post_process_type[key]["temperature"][0])
+            else:
+                temperature_ = 298.15
+
             if key.lower() == "stationary":
-                self.process_stationary_pts(post_process_type[key], grad_cut_off=grad_cut_off)
+                self.process_stationary_pts(temperature_, grad_cut_off=grad_cut_off)
             elif key.lower() == "single point":
                 if "to_pinn" in post_process_type[key]:
                     to_pinn = post_process_type[key]["to_pinn"]
@@ -92,17 +97,42 @@ class Orca5Processor:
                 self.process_single_pts(post_process_type[key], to_pinn=to_pinn, level_of_theory=lvl_of_theory)
 
     @staticmethod
-    def orca5_to_pd(orca5_objs, temperature=298.15):
+    def orca5_to_pd(orca5_objs_, temperature_=298.15):
         """
-        Combine information from all the Orca 5 objects into a pd dataframe
-        TODO: Warning to txt file
-        :param orca5_objs:
-        :type orca5_objs: [Orca5]
+
+        :param orca5_objs_: Combine information from all the Orca 5 objects into a pd dataframe
+        :type orca5_objs_:
+        :param temperature_:
+        :type temperature_:
         :return:
         :rtype:
         """
-        for item in orca5_objs:
-            item.create_labelled_data(temperature=temperature)
+        for item in orca5_objs_:
+            item.create_labelled_data(temperature=temperature_)
+
+    @staticmethod
+    def parse_pp_inp(path_to_pp_inp):
+        """
+
+        :param path_to_pp_inp:
+        :type path_to_pp_inp: str
+        :return:
+        :rtype: Dict[str, List[str]]
+        """
+        with open(path_to_pp_inp) as f:
+            lines = f.readlines()
+
+        specifications = {}
+        for line in lines:
+            try:
+                key, values = line.split("=")
+            except ValueError:
+                raise ValueError(f"{line} is in a readable format: key = x y z")
+
+            values = values.split()
+            values = [item.strip() for item in values]
+            specifications[key.strip()] = values.copy()
+        return specifications
 
     def display_warning(self):
         print("\n-------------------------------Displaying warnings detected------------------------------------------")
@@ -243,7 +273,7 @@ class Orca5Processor:
             assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
 
         for key in self.folders_to_orca5:
-            self.orca5_to_pd(self.folders_to_orca5[key], temperature=temperature)
+            self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
 
         # All SP structures must be consistent with the structure in the reference obj
         sp_objs: Dict[str, List[Orca5]] = {}
@@ -271,6 +301,8 @@ class Orca5Processor:
                 # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
                 labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
                 for item in ref_objs[key][0].labelled_data:
+                    if item == "N Img Freq" or item == "Negative Freqs":
+                        continue
                     opt_theory, thermo_corr_type = item.split("--")
                     if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
                         for sp_key in obj_.labelled_data:
@@ -299,6 +331,7 @@ class Orca5Processor:
         """
         for key in self.folders_to_orca5:
             ref_objs: List[Orca5] = []
+            failed_objs: List[str] = []
             # Find the reference object
             for orca5_obj in self.folders_to_orca5[key]:
                 if "FREQ" in orca5_obj.job_type_objs:
@@ -306,11 +339,18 @@ class Orca5Processor:
                         if not orca5_obj.method.is_print_thermo:
                             ref_objs.append(orca5_obj)
                     elif not orca5_obj.job_type_objs["FREQ"].neligible_gradient:
-                        diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
-                        if np.any(diff_wrt_ref < 0.0):
-                            print(f"Max gradient is above loosen cut-off={grad_cut_off:.5E} ... termininating")
-                        else:
-                            ref_objs.append(orca5_obj)
+                        try:
+                            diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
+                            if np.any(diff_wrt_ref < 0.0):
+                                print(f"Max gradient is above loosen cut-off={grad_cut_off:.5E} ... termininating")
+                            else:
+                                ref_objs.append(orca5_obj)
+                        except TypeError:
+                            failed_objs.append(f"{key} {orca5_obj.level_of_theory} -- SP does not have a gradient")
+
+            if len(failed_objs) > 0:
+                print(f"FATAL ERRORS detected!!")
+                raise TypeError(failed_objs)
 
             assert len(ref_objs) != 0, f"We cannot find a valid Orca 5 object with a valid FREQ " \
                                        f"or OPT+FREQ job for {key}!"
@@ -359,14 +399,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-r", "--root", help="Path of the root folder")
-
+    parser.add_argument("-t", "--pptype", help="Post processing type. Supported: \"single point\" \"stationary\" ")
+    parser.add_argument("-i", "--ppinp", help="path to a text file to specific various options for post processing")
     args = parser.parse_args()
-    # root_ = r"E:\TEST\Orca5Processor_tests\YZQ\DEBUG"
-    # root_ = r"E:\vBoxShared\PiNN_database\TCH_catalysts\YZQ-PNtBU-Steglich-Step1TS"
-    # orca5_ojbs = Orca5Processor(root_, display_warning=True,
-    #                             post_process_type={"stationary": 253.15, "grad_cut_off": 1e-4},
-    #                             delete_incomplete_job=True)
 
-    orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
+    assert args.ppinp is not None, "Please specific the full path to ppinp"
+    spec = Orca5Processor.parse_pp_inp(args.ppinp)
+
+    if args.pptype == "stationary":
+        orca5_ojbs = Orca5Processor(args.root,
+                                    display_warning=True,
+                                    post_process_type={"stationary": spec},
+                                    delete_incomplete_job=True)
+    elif args.pptype == "single point":
+        orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
                                                               {"to_pinn": ["pickle", "energy"],
                                                                "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
