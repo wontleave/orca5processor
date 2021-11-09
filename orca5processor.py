@@ -258,14 +258,13 @@ class Orca5Processor:
                     if obj.job_type_objs["FREQ"].neligible_gradient:
                         ref_objs[key].append(obj)
                     else:
-                        orig_cut_off = obj.job_type_objs["SP"].gradients_cut_off
-                        loosen_cut_off = orig_cut_off * 10.0
+                        loosen_cut_off = grad_cut_off * 2.0
                         diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
                         if np.any(diff_wrt_ref < 0.0):
-                            max_grad = np.max(obj["SP"].gradients)
+                            max_grad = np.max(obj.job_type_objs["SP"].gradients)
                             print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
                         else:
-                            print(f"Loosen cut-off from {orig_cut_off:.2E} to {loosen_cut_off:.2E}"
+                            print(f"Loosen cut-off from {grad_cut_off:.2E} to {loosen_cut_off:.2E}"
                                   f" - successful - Adding {obj.input_name}")
                             ref_objs[key].append(obj)
                             obj.job_type_objs["FREQ"].neligible_gradient = True

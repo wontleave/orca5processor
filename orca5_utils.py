@@ -384,8 +384,8 @@ class Orca5:
             level_of_theory += f"/{basis}"
 
         if "QMMM" in self.job_types:
-            if self.keywords["QMMM"].lvl_of_theory != "":
-                high_level, low_level = self.keywords["QMMM"].lvl_of_theory.split("/")
+            if self.keywords["qmmm"].lvl_of_theory != "":
+                high_level, low_level = self.keywords["qmmm"].lvl_of_theory.split("/")
                 level_of_theory += f":{low_level}"
 
         if "CPCM" in self.job_types:
