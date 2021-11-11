@@ -402,8 +402,14 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--ppinp", help="path to a text file to specific various options for post processing")
     args = parser.parse_args()
 
-    assert args.ppinp is not None, "Please specific the full path to ppinp"
-    spec = Orca5Processor.parse_pp_inp(args.ppinp)
+    if args.ppinp is None:
+        ppinp_path = path.join(args.root, "ppinp.txt")
+        temp_ = Path(ppinp_path)
+        assert temp_.is_file(), f"{temp_.resolve()} is not a valid file or doesn't exist!"
+    else:
+        ppinp_path = args.ppinp
+
+    spec = Orca5Processor.parse_pp_inp(ppinp_path)
 
     if args.pptype == "stationary":
         orca5_ojbs = Orca5Processor(args.root,
