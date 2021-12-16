@@ -39,8 +39,8 @@ class Orca5:
         # Each job type will have its own object
         # SP: Scf
         # ENGRAD: Scf
-        # OPT: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
-        # OPTTS: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a sucessful opt)
+        # OPT: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a successful opt)
+        # OPTTS: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a successful opt)
         # Freq: Scf + Freq
         # IRC: Scf + IRC
         self.job_type_objs = {}
@@ -396,6 +396,8 @@ class Orca5:
                 solvent = self.keywords["cpcm"].solvent
                 if self.keywords["cpcm"].name == "ALPB":
                     fepstype = "ALPB"
+                elif self.keywords["cpcm"].keywords["cds_cpcm"] == 2:
+                    fepstype = "CPCM2"
                 else:
                     fepstype = self.keywords["cpcm"].keywords["fepstype"]
                 level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
@@ -575,12 +577,13 @@ class Cpcm:
         self.keywords = {"epsilon": None, "refrac": None, "rsolv": None, "rmin": None, "pmin": None,
                          "surfacetype": None, "fepstype": None, "xfeps": None,
                          "ndiv": None, "num_leb": None,
-                         "smd": "False", "smdsolvent": None
+                         "smd": "False", "smdsolvent": None,
+                         "cds_cpcm": None
                          }
 
         self.single_value_str = ("surfacetype", "fepstype", "smd", "smdsolvent")
         self.single_value_float = ("epsilon", "refrac", "rmin", "pmin", "rsolv", "xfeps")
-        self.single_value_int = ("ndiv", "num_leb")
+        self.single_value_int = ("ndiv", "num_leb", "cds_cpcm")
         self.multi_values = ()  # Multi_values keywords required an "end" to terminate
 
     def get_cpcm_details(self, lines_):
