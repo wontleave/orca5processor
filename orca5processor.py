@@ -316,10 +316,13 @@ class Orca5Processor:
                 row_labels = list(labeled_data[key_from_base].keys())
                 counter += 1
         combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
-        combined_df.to_excel(path.join(self.root_folder_path, "stationary.xlsx"))
+        suffix = path.basename(self.root_folder_path)
+        combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
     def merge_thermo(self, temperature=298.15, grad_cut_off=1e-5):
         """
+        TODO: Have not implemented multiple PrintThermo
+        TODO: Final single point is not present in PrintThermo
         Merge and delete Orca5 that belongs to a printthermochem job with Orca5 from a Freq or Opt+Freq job
         :param temperature: the required temperature
         :type temperature: float
@@ -335,8 +338,7 @@ class Orca5Processor:
             for orca5_obj in self.folders_to_orca5[key]:
                 if "FREQ" in orca5_obj.job_type_objs:
                     if "OPT" in orca5_obj.job_type_objs or orca5_obj.job_type_objs["FREQ"].neligible_gradient:
-                        if not orca5_obj.method.is_print_thermo:
-                            ref_objs.append(orca5_obj)
+                        ref_objs.append(orca5_obj)
                     elif not orca5_obj.job_type_objs["FREQ"].neligible_gradient:
                         try:
                             diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
@@ -357,7 +359,8 @@ class Orca5Processor:
 
             for idx, print_thermo_obj in enumerate(self.folders_to_orca5[key]):
                 if print_thermo_obj.method.is_print_thermo:
-                    orca5_obj_to_exclude.append(idx)
+                    if len(ref_objs) > 1:
+                        orca5_obj_to_exclude.append(idx)
                     for ref_obj in ref_objs:
                         temp_ = print_thermo_obj.job_type_objs["FREQ"]
                         elec_energy = ref_obj.job_type_objs["FREQ"].elec_energy
@@ -370,20 +373,21 @@ class Orca5Processor:
                                                   temp_.thermo_data[temperature]["total entropy correction"]
 
                         ref_obj_thermo_data = ref_obj.job_type_objs["FREQ"].thermo_data
-                        assert temperature not in ref_obj_thermo_data, f"The requested temperature is already present!"
-                        ref_obj_thermo_data[temperature] = {}
-                        ref_obj_thermo_data[temperature]["zero point energy"] = \
-                            temp_.thermo_data[temperature]["zero point energy"]
-                        ref_obj_thermo_data[temperature]["total thermal correction"] = \
-                            temp_.thermo_data[temperature]["total thermal correction"]
-                        ref_obj_thermo_data[temperature]["thermal Enthalpy correction"] = \
-                            temp_.thermo_data[temperature]["thermal Enthalpy correction"]
-                        ref_obj_thermo_data[temperature]["total entropy correction"] = \
-                            temp_.thermo_data[temperature]["total entropy correction"]
+                        # assert temperature not in ref_obj_thermo_data, f"The requested temperature is already present!"
+                        if temperature not in ref_obj_thermo_data:
+                            ref_obj_thermo_data[temperature] = {}
+                            ref_obj_thermo_data[temperature]["zero point energy"] = \
+                                temp_.thermo_data[temperature]["zero point energy"]
+                            ref_obj_thermo_data[temperature]["total thermal correction"] = \
+                                temp_.thermo_data[temperature]["total thermal correction"]
+                            ref_obj_thermo_data[temperature]["thermal Enthalpy correction"] = \
+                                temp_.thermo_data[temperature]["thermal Enthalpy correction"]
+                            ref_obj_thermo_data[temperature]["total entropy correction"] = \
+                                temp_.thermo_data[temperature]["total entropy correction"]
 
-                        ref_obj_thermo_data[temperature]["total thermal energy"] = total_thermal_energy
-                        ref_obj_thermo_data[temperature]["total enthalpy"] = total_enthalpy
-                        ref_obj_thermo_data[temperature]["final gibbs free energy"] = final_gibbs_free_energy
+                            ref_obj_thermo_data[temperature]["total thermal energy"] = total_thermal_energy
+                            ref_obj_thermo_data[temperature]["total enthalpy"] = total_enthalpy
+                            ref_obj_thermo_data[temperature]["final gibbs free energy"] = final_gibbs_free_energy
 
             req_orca5_objs = []
 

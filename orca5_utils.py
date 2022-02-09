@@ -41,7 +41,7 @@ class Orca5:
         # ENGRAD: Scf
         # OPT: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a successful opt)
         # OPTTS: Scf + Geom + Freq(optional, depends on whether there is a frequency calc after a successful opt)
-        # Freq: Scf + Freq
+        # Freq and PrintThermo: Scf + Freq
         # IRC: Scf + IRC
         self.job_type_objs = {}
         self.method: Method
@@ -121,7 +121,11 @@ class Orca5:
                 self.job_type_objs["OPT"].get_opt_geo(lines_)
                 # TODO read from xyz as an option?
             elif job_type in ("FREQ", "ANFREQ", "NUMFREQ"):
-                self.job_type_objs["FREQ"].get_thermochemistry(lines_)
+                if self.method.is_print_thermo:
+                    self.job_type_objs["FREQ"].get_thermochemistry(lines_, print_thermo=True)
+                else:
+                    self.job_type_objs["FREQ"].get_thermochemistry(lines_)
+
                 if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
 
                     # Read the engrad to determine if we have a minimum.
@@ -363,44 +367,54 @@ class Orca5:
         has_dft_exchange = False
         has_dft_correlation = False
 
-        if self.method.keywords["functional"] is not None:
-            level_of_theory += self.method.keywords["functional"]
-        if self.method.keywords["exchange"] is not None:
-            level_of_theory += self.method.keywords["exchange"].split("_")[-1]
-            has_dft_exchange = True
-        if self.method.keywords["correlation"] is not None:
-            level_of_theory += self.method.keywords["correlation"].split("_")[-1]
-            has_dft_correlation = True
+        if self.method.is_print_thermo:
+            print_thermo_spec_path = path.join(self.root_path, "PRINT_THERMO_SUPP.txt")
+            print_thermo_spec = Path(print_thermo_spec_path)
+            assert print_thermo_spec.is_file(), f"Cannot find {print_thermo_spec_path}. A PRINTTHERMO Job needs this!"
+            lines = print_thermo_spec.read_text().split("\n")
+            for line in lines:
+                if "level_of_theory" in line:
+                    level_of_theory = line.split()[-1]
 
-        if has_dft_exchange and has_dft_correlation and "mp2" in self.keywords:
-            # Some custom double-hybrid functional
-            if self.keywords["mp2"].keywords["doscs"].lower() == "true":
-                level_of_theory = "DSD-" + level_of_theory
-            if self.keywords["mp2"].keywords["dlpno"].lower() == "true":
-                level_of_theory = "DLPNO-" + level_of_theory
+        else:
+            if self.method.keywords["functional"] is not None:
+                level_of_theory += self.method.keywords["functional"]
+            if self.method.keywords["exchange"] is not None:
+                level_of_theory += self.method.keywords["exchange"].split("_")[-1]
+                has_dft_exchange = True
+            if self.method.keywords["correlation"] is not None:
+                level_of_theory += self.method.keywords["correlation"].split("_")[-1]
+                has_dft_correlation = True
 
-        if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
-            basis = self.basis.keywords["basis"]
-            level_of_theory += f"/{basis}"
+            if has_dft_exchange and has_dft_correlation and "mp2" in self.keywords:
+                # Some custom double-hybrid functional
+                if self.keywords["mp2"].keywords["doscs"].lower() == "true":
+                    level_of_theory = "DSD-" + level_of_theory
+                if self.keywords["mp2"].keywords["dlpno"].lower() == "true":
+                    level_of_theory = "DLPNO-" + level_of_theory
 
-        if "QMMM" in self.job_types:
-            if self.keywords["qmmm"].lvl_of_theory != "":
-                high_level, low_level = self.keywords["qmmm"].lvl_of_theory.split("/")
-                level_of_theory += f":{low_level}"
+            if "3c" not in level_of_theory and self.basis.keywords["basis"] is not None:
+                basis = self.basis.keywords["basis"]
+                level_of_theory += f"/{basis}"
 
-        if "CPCM" in self.job_types:
-            if self.keywords["cpcm"].keywords["smd"].lower() == "true":
-                solvent = self.keywords["cpcm"].keywords["smdsolvent"]
-                level_of_theory = f"SMD({(solvent)})/" + level_of_theory
-            else:
-                solvent = self.keywords["cpcm"].solvent
-                if self.keywords["cpcm"].name == "ALPB":
-                    fepstype = "ALPB"
-                elif self.keywords["cpcm"].keywords["cds_cpcm"] == 2:
-                    fepstype = "CPCM2"
+            if "QMMM" in self.job_types:
+                if self.keywords["qmmm"].lvl_of_theory != "":
+                    high_level, low_level = self.keywords["qmmm"].lvl_of_theory.split("/")
+                    level_of_theory += f":{low_level}"
+
+            if "CPCM" in self.job_types:
+                if self.keywords["cpcm"].keywords["smd"].lower() == "true":
+                    solvent = self.keywords["cpcm"].keywords["smdsolvent"]
+                    level_of_theory = f"SMD({(solvent)})/" + level_of_theory
                 else:
-                    fepstype = self.keywords["cpcm"].keywords["fepstype"]
-                level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
+                    solvent = self.keywords["cpcm"].solvent
+                    if self.keywords["cpcm"].name == "ALPB":
+                        fepstype = "ALPB"
+                    elif self.keywords["cpcm"].keywords["cds_cpcm"] == 2:
+                        fepstype = "CPCM2"
+                    else:
+                        fepstype = self.keywords["cpcm"].keywords["fepstype"]
+                    level_of_theory = f"{fepstype}({(solvent)})/" + level_of_theory
 
         self.level_of_theory = level_of_theory
 
@@ -753,13 +767,14 @@ class Freq:
         self.neligible_gradient = False
         self.geo_from_output = None
 
-    def get_thermochemistry(self, lines_, with_opt=False):
+    def get_thermochemistry(self, lines_, with_opt=False, print_thermo=False):
         """
-
+        TODO: Handle printthermo
         :param lines_:
         :type lines_:
         :param with_opt: indicate whether a Freq job is part of an opt or optTS job, If true, the Freq information will
         only be obtained after the geometry optimization has converged.
+        :param print_thermo: if this is a printthermo job, there will be no information on geometry
         :type with_opt: bool
         :return:
         :rtype:
@@ -786,7 +801,10 @@ class Freq:
 
         # In case of a OPT+FREQ, the
         for i in range(len(lines_) - 1, 0, -1):
-            if "THE OPTIMIZATION HAS CONVERGED" in lines_[i]:
+            if print_thermo and "ORCA THERMOCHEMISTRY ANALYSIS" in lines_[i]:
+                req_idx = i
+                break
+            elif "THE OPTIMIZATION HAS CONVERGED" in lines_[i]:
                 req_idx = i
                 break
 
@@ -1248,7 +1266,7 @@ def get_orca5_keywords(lines_):
         elif "NAME" in item:
             name = flatten_lines[idx + 1].strip()
             idx_to_exclude = [idx + 1]
-        elif "*" in item:  # * marks the beginning of coordinates specfification
+        elif "*" in item:  # * marks the beginning of coordinates specification
             coord_type = flatten_lines[idx + 1]
             multiplicity = int(flatten_lines[idx + 2])
             charge = int(flatten_lines[idx + 3])
