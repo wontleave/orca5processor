@@ -343,7 +343,8 @@ class Orca5Processor:
                         try:
                             diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
                             if np.any(diff_wrt_ref < 0.0):
-                                print(f"Max gradient is above loosen cut-off={grad_cut_off:.5E} ... termininating")
+                                print(f"Max gradient is {np.min(diff_wrt_ref)}above loosen cut-off={grad_cut_off:.5E} "
+                                      f"... termininating")
                             else:
                                 ref_objs.append(orca5_obj)
                         except TypeError:

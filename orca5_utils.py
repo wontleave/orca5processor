@@ -681,7 +681,7 @@ class Geom:
                 req_idx = i
                 break
 
-        assert req_idx > 0, f"Invalid Orca 5 FREQ output file detected!"
+        assert req_idx > 0, f"Invalid Orca 5 FREQ output file detected! or incomplete geometry optimization!"
 
         for line in lines_[req_idx:]:
             # Read cartesian coordinates if start_to_read_xyz == 2
