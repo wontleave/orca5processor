@@ -28,7 +28,9 @@ class Orca5Processor:
     def __init__(self, root_folder_path,
                  post_process_type=None,
                  display_warning=False,
-                 delete_incomplete_job=False
+                 delete_incomplete_job=False,
+                 warning_txt_file=None,
+                 error_handling=None
                  ):
         self.root_folder_path = root_folder_path
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
@@ -36,6 +38,12 @@ class Orca5Processor:
         # Get all the folders within the root
         all_folders = []
         read_root_folders(root_folder_path, all_folders)
+
+        for key in post_process_type:
+            if "grad_cut_off" in post_process_type[key]:
+                grad_cut_off = float(post_process_type[key]["grad_cut_off"][0])  # value is a list.
+            else:
+                grad_cut_off = 1e-5
 
         # Determine which folder has the orca output
         for folder in all_folders:
@@ -59,7 +67,7 @@ class Orca5Processor:
                 self.folders_to_orca5[folder] = []
                 for out_file in output_files:
                     time_temp = time.perf_counter()
-                    self.folders_to_orca5[folder].append(Orca5(out_file))
+                    self.folders_to_orca5[folder].append(Orca5(out_file, grad_cut_off))
                     print(f"{out_file} took {time.perf_counter() - time_temp:.2f} s")
             time_end = time.perf_counter()
             print(f"DONE in {time_end - time_start:.2f} sec")
@@ -68,14 +76,9 @@ class Orca5Processor:
         self.remove_incomplete_job(delete_incomplete_job)
         # Post processing according to the process type indicated
         if display_warning:
-            self.display_warning()
+            self.display_warning(warning_txt_path=warning_txt_file)
 
         for key in post_process_type:
-            if "grad_cut_off" in post_process_type[key]:
-                grad_cut_off = float(post_process_type[key]["grad_cut_off"][0])  # value is a list.
-            else:
-                grad_cut_off = 1e-5
-
             if "temperature" in post_process_type[key]:
                 temperature_ = float(post_process_type[key]["temperature"][0])
             else:
@@ -108,7 +111,8 @@ class Orca5Processor:
         :rtype:
         """
         for item in orca5_objs_:
-            item.create_labelled_data(temperature=temperature_)
+            if not item.method.is_print_thermo:
+                item.create_labelled_data(temperature=temperature_)
 
     @staticmethod
     def parse_pp_inp(path_to_pp_inp):
@@ -134,17 +138,30 @@ class Orca5Processor:
             specifications[key.strip()] = values.copy()
         return specifications
 
-    def display_warning(self):
-        print("\n-------------------------------Displaying warnings detected------------------------------------------")
+    def display_warning(self, warning_txt_path=False):
+        """
+
+        :param warning_txt_path: the path for the text file which the content of the warnings will be written to
+        :type warning_txt_path: str
+        :return:
+        """
+
+        content = "\n------------------------------Displaying warnings detected---------------------------------------"
+
         for key in self.folders_to_orca5:
-            print(f"Source folder: {key}")
+            content += f"\nSource folder: {key}"
             try:
                 for item in self.folders_to_orca5[key]:
-                    print(f"{item.input_name} --- Warnings: {item.warnings}")
+                    content += f"\n{item.input_name} --- Warnings: {item.warnings}"
             except TypeError:
                 raise TypeError(f"{key} is problematic")
             print()
-        print("---------------------------------END of warning(s) section---------------------------------------------")
+        content += "\n--------------------------------END of warning(s) section----------------------------------------"
+        content += "\n"
+        print(content)
+        if warning_txt_path is not None:
+            with open(warning_txt_path, "w") as f:
+                f.writelines(content)
 
     def remove_incomplete_job(self, delete_incomplete_job):
         """
@@ -237,39 +254,48 @@ class Orca5Processor:
         """
         # Check if all the folders have the same number of orca5 object
         ref_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
+        print_thermo_objs: Dict[str, List[Orca5]] = {}
 
-        self.merge_thermo(temperature=temperature, grad_cut_off=grad_cut_off)
+        # After merge_thermo, all the printthermo obj will be removed
+        # self.merge_thermo(temperature=temperature, grad_cut_off=grad_cut_off)
 
         for key in self.folders_to_orca5:
             ref_objs[key] = []
+            print_thermo_objs[key] = []
             no_of_opt = 0
             temp_obj_lists_ = self.folders_to_orca5[key]
             for obj in temp_obj_lists_:
-                if "OPT" in obj.job_type_objs and "FREQ" in obj.job_type_objs:
-                    if len(ref_objs[key]) == 1:
-                        # Check if the OPT object structure is the same as the current one
-                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                        if rmsd_ > 1e-5:
-                            ref_objs[key].append(obj)
-                    else:
-                        ref_objs[key].append(obj)
-
-                elif "FREQ" in obj.job_type_objs:
-                    if obj.job_type_objs["FREQ"].neligible_gradient:
-                        ref_objs[key].append(obj)
-                    else:
-                        loosen_cut_off = grad_cut_off * 2.0
-                        diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
-                        if np.any(diff_wrt_ref < 0.0):
-                            max_grad = np.max(obj.job_type_objs["SP"].gradients)
-                            print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
+                if obj.method.is_print_thermo:
+                    print_thermo_objs[key].append(obj)
+                else:
+                    if "OPT" in obj.job_type_objs and "FREQ" in obj.job_type_objs:
+                        if len(ref_objs[key]) == 1:
+                            # Check if the OPT object structure is the same as the current one
+                            rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                            if rmsd_ > 1e-5:
+                                ref_objs[key].append(obj)
                         else:
-                            print(f"Loosen cut-off from {grad_cut_off:.2E} to {loosen_cut_off:.2E}"
-                                  f" - successful - Adding {obj.input_name}")
                             ref_objs[key].append(obj)
-                            obj.job_type_objs["FREQ"].neligible_gradient = True
+
+                    elif "FREQ" in obj.job_type_objs:
+                        if obj.job_type_objs["FREQ"].negligible_gradient:
+                            ref_objs[key].append(obj)
+                        else:
+                            loosen_cut_off = grad_cut_off * 2.0
+                            diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
+                            if np.any(diff_wrt_ref < 0.0):
+                                max_grad = np.max(obj.job_type_objs["SP"].gradients)
+                                print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
+                            else:
+                                print(f"Loosen cut-off from {grad_cut_off:.2E} to {loosen_cut_off:.2E}"
+                                      f" - successful - Adding {obj.input_name}")
+                                ref_objs[key].append(obj)
+                                obj.job_type_objs["FREQ"].negligible_gradient = True
 
             assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
+            # Merge the printthermo job to ref_obj
+            if len(print_thermo_objs[key]) > 0:
+               self.merge_thermo(print_thermo_objs[key], ref_objs[key][0])
 
         for key in self.folders_to_orca5:
             self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
@@ -319,84 +345,41 @@ class Orca5Processor:
         suffix = path.basename(self.root_folder_path)
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
-    def merge_thermo(self, temperature=298.15, grad_cut_off=1e-5):
+    def merge_thermo(self, print_thermo_obj, ref_obj):
         """
+        Populate the self.freqs Dict in ref_obj
+
         TODO: Have not implemented multiple PrintThermo
         TODO: Final single point is not present in PrintThermo
         Merge and delete Orca5 that belongs to a printthermochem job with Orca5 from a Freq or Opt+Freq job
-        :param temperature: the required temperature
-        :type temperature: float
-        :param grad_cut_off: A manual gradient cut-off for SP gradient
-        :type grad_cut_off: float
-        :return:
+        :param print_thermo_obj: the Orca5 object with the printthermo job
+        :type print_thermo_obj: Orca5
+        :param ref_obj: the reference obj
+        :type ref_obj: Orca5
+        :return: None
         :rtype:
         """
-        for key in self.folders_to_orca5:
-            ref_objs: List[Orca5] = []
-            failed_objs: List[str] = []
-            # Find the reference object
-            for orca5_obj in self.folders_to_orca5[key]:
-                if "FREQ" in orca5_obj.job_type_objs:
-                    if "OPT" in orca5_obj.job_type_objs or orca5_obj.job_type_objs["FREQ"].neligible_gradient:
-                        ref_objs.append(orca5_obj)
-                    elif not orca5_obj.job_type_objs["FREQ"].neligible_gradient:
-                        try:
-                            diff_wrt_ref = grad_cut_off - orca5_obj.job_type_objs["SP"].gradients
-                            if np.any(diff_wrt_ref < 0.0):
-                                print(f"Max gradient is {np.min(diff_wrt_ref)}above loosen cut-off={grad_cut_off:.5E} "
-                                      f"... termininating")
-                            else:
-                                ref_objs.append(orca5_obj)
-                        except TypeError:
-                            failed_objs.append(f"{key} {orca5_obj.level_of_theory} -- SP does not have a gradient")
 
-            if len(failed_objs) > 0:
-                print(f"FATAL ERRORS detected!!")
-                raise TypeError(failed_objs)
+        for obj_ in print_thermo_obj:
+            obj_.job_type_objs["FREQ"].elec_energy = ref_obj.job_type_objs["FREQ"].elec_energy
+            temperature = obj_.job_type_objs["FREQ"].temp
+            freq_ = obj_.job_type_objs["FREQ"]  # point to the Freq obj in the current printthermo object
+            elec_energy = ref_obj.job_type_objs["FREQ"].elec_energy
+            zpe_corr_energy = elec_energy + freq_.zero_pt_energy
+            freq_.total_thermal_energy = zpe_corr_energy + freq_.total_thermal_correction
+            freq_.total_enthalpy = freq_.total_thermal_energy + freq_.thermal_enthalpy_correction
+            freq_.final_gibbs_free_energy = freq_.total_enthalpy + freq_.final_entropy_term
 
-            assert len(ref_objs) != 0, f"We cannot find a valid Orca 5 object with a valid FREQ " \
-                                       f"or OPT+FREQ job for {key}!"
-            orca5_obj_to_exclude = []
+            freq_.thermo_data[temperature] = {"zero point energy": freq_.zero_pt_energy,
+                                        "total thermal correction": freq_.total_thermal_correction,
+                                        "thermal Enthalpy correction": freq_.thermal_enthalpy_correction,
+                                        "total entropy correction": freq_.final_entropy_term,
+                                        "zero point corrected energy": zpe_corr_energy,
+                                        "total thermal energy": freq_.total_thermal_energy,
+                                        "total enthalpy": freq_.total_enthalpy,
+                                        "final gibbs free energy": freq_.final_gibbs_free_energy}
 
-            for idx, print_thermo_obj in enumerate(self.folders_to_orca5[key]):
-                if print_thermo_obj.method.is_print_thermo:
-                    if len(ref_objs) > 1:
-                        orca5_obj_to_exclude.append(idx)
-                    for ref_obj in ref_objs:
-                        temp_ = print_thermo_obj.job_type_objs["FREQ"]
-                        elec_energy = ref_obj.job_type_objs["FREQ"].elec_energy
-                        zpe_corr_energy = elec_energy + temp_.thermo_data[temperature]["zero point energy"]
-                        total_thermal_energy = zpe_corr_energy + \
-                                               temp_.thermo_data[temperature]["total thermal correction"]
-                        total_enthalpy = total_thermal_energy + \
-                                         temp_.thermo_data[temperature]["thermal Enthalpy correction"]
-                        final_gibbs_free_energy = total_enthalpy + \
-                                                  temp_.thermo_data[temperature]["total entropy correction"]
-
-                        ref_obj_thermo_data = ref_obj.job_type_objs["FREQ"].thermo_data
-                        # assert temperature not in ref_obj_thermo_data, f"The requested temperature is already present!"
-                        if temperature not in ref_obj_thermo_data:
-                            ref_obj_thermo_data[temperature] = {}
-                            ref_obj_thermo_data[temperature]["zero point energy"] = \
-                                temp_.thermo_data[temperature]["zero point energy"]
-                            ref_obj_thermo_data[temperature]["total thermal correction"] = \
-                                temp_.thermo_data[temperature]["total thermal correction"]
-                            ref_obj_thermo_data[temperature]["thermal Enthalpy correction"] = \
-                                temp_.thermo_data[temperature]["thermal Enthalpy correction"]
-                            ref_obj_thermo_data[temperature]["total entropy correction"] = \
-                                temp_.thermo_data[temperature]["total entropy correction"]
-
-                            ref_obj_thermo_data[temperature]["total thermal energy"] = total_thermal_energy
-                            ref_obj_thermo_data[temperature]["total enthalpy"] = total_enthalpy
-                            ref_obj_thermo_data[temperature]["final gibbs free energy"] = final_gibbs_free_energy
-
-            req_orca5_objs = []
-
-            for i in range(len(self.folders_to_orca5[key])):
-                if i not in orca5_obj_to_exclude:
-                    req_orca5_objs.append(self.folders_to_orca5[key][i])
-
-            self.folders_to_orca5[key] = req_orca5_objs
+            ref_obj.freqs[temperature] = freq_
 
 
 if __name__ == "__main__":
@@ -417,10 +400,19 @@ if __name__ == "__main__":
     spec = Orca5Processor.parse_pp_inp(ppinp_path)
 
     if args.pptype == "stationary":
+        warning_path = None
+        if "warning" in spec:
+            # spec["warning"] is a list of str
+            if spec["warning"][0].lower() == "here":
+                warning_path = path.join(args.root, "warning.txt")
+            else:
+                warning_path = spec["warning"][0]
+
         orca5_ojbs = Orca5Processor(args.root,
                                     display_warning=True,
                                     post_process_type={"stationary": spec},
-                                    delete_incomplete_job=True)
+                                    delete_incomplete_job=True,
+                                    warning_txt_file=warning_path)
     elif args.pptype == "single point":
         orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
                                                               {"to_pinn": ["pickle", "energy"],

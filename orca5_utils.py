@@ -20,7 +20,7 @@ class Orca5:
     !!!Maybe compatible with ORCA 4, but use at your own risk
     """
 
-    def __init__(self, orca_out_file,
+    def __init__(self, orca_out_file, grad_cut_off,
                  property_path=None,
                  engrad_path=None,
                  output_path=None,
@@ -35,7 +35,7 @@ class Orca5:
         self.job_types = []  # If job_types is None after processing the given folder
         self.level_of_theory = None  # e.g CPCM(solvent)/B97-3c, CPCM(solvent)/wB97X-V/def2-TZVPP//PBEh-3c
         self.labelled_data: Dict[str, str] = {}  # Used to create a pandas for writing to excel
-        self.warnings = []
+        self.warnings = []  # large gradient, incomplete job
         # Each job type will have its own object
         # SP: Scf
         # ENGRAD: Scf
@@ -52,6 +52,10 @@ class Orca5:
         self.geo_from_output = None  # All properties are derived from this structure.
         self.geo_from_xyz: Atoms
         self.geo_from_xyz = None  # The actual xyzfile used for the Orca 5 calculation
+
+        self.freqs = {}  # A dict of Freq objects with temperature as the key(s)
+
+        # Variables to check for certain condition
         self.completed_job = False  # A valid output file needs to have ORCA TERMINATED NORMALLY
 
         # Only property file -> single point, spectroscopic properties? Elec energy here doesn't include SRM
@@ -76,7 +80,7 @@ class Orca5:
             self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
 
             self.determine_jobtype()
-            self.parse_orca5_output(lines[self.input_section["end"]:])
+            self.parse_orca5_output(lines[self.input_section["end"]:], grad_cut_off)
             self.get_level_of_theory()
 
             if self.coord_spec["coord_type"] == "xyzfile":
@@ -106,7 +110,7 @@ class Orca5:
         else:
             self.warnings.append("INCOMPLETE ORCA5 job detect!")
 
-    def parse_orca5_output(self, lines_):
+    def parse_orca5_output(self, lines_, grad_cut_off):
         """
         job_types will determine what information to extract
         SP: only final single point energy
@@ -125,6 +129,7 @@ class Orca5:
                     self.job_type_objs["FREQ"].get_thermochemistry(lines_, print_thermo=True)
                 else:
                     self.job_type_objs["FREQ"].get_thermochemistry(lines_)
+                    self.freqs[self.job_type_objs["FREQ"].temp] = self.job_type_objs["FREQ"]
 
                 if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
 
@@ -135,27 +140,24 @@ class Orca5:
                     engrad_from_coord = engrad_from_coord.with_suffix(".engrad")
                     if engrad_from_coord.is_file():
                         self.job_type_objs["SP"].read_gradient(engrad_from_coord.resolve())
-                        cut_off = self.job_type_objs["SP"].gradients_cut_off
-                        # Gradient check atol of 5e-6
-                        diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                        diff_wrt_ref = grad_cut_off - self.job_type_objs["SP"].gradients
                         if np.any(diff_wrt_ref < 0.0):
                             max_grad = np.max(self.job_type_objs["SP"].gradients)
-                            self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                            self.warnings.append(f"Max gradient is above {grad_cut_off}: {max_grad}")
                         else:
-                            self.job_type_objs["FREQ"].neligible_gradient = True
+                            self.job_type_objs["FREQ"].negligible_gradient = True
                     else:
                         temp_path = path.join(self.root_path, self.input_name)
                         engrad_from_inp = Path(temp_path)
                         engrad_from_inp = engrad_from_inp.with_suffix(".engrad")
                         if engrad_from_inp.is_file():
                             self.job_type_objs["SP"].read_gradient(engrad_from_inp.resolve())
-                            cut_off = self.job_type_objs["SP"].gradients_cut_off
-                            diff_wrt_ref = cut_off - self.job_type_objs["SP"].gradients
+                            diff_wrt_ref = grad_cut_off - self.job_type_objs["SP"].gradients
                             if np.any(diff_wrt_ref < 0.0):
                                 max_grad = np.max(self.job_type_objs["SP"].gradients)
-                                self.warnings.append(f"Max gradient is above {cut_off}: {max_grad}")
+                                self.warnings.append(f"Max gradient is above {grad_cut_off}: {max_grad}")
                             else:
-                                self.job_type_objs["FREQ"].neligible_gradient = True
+                                self.job_type_objs["FREQ"].negligible_gradient = True
                         else:
                             self.warnings.append("No engrad can be found for a frequency calculation")
 
@@ -199,6 +201,7 @@ class Orca5:
         """
         qmmm_lvl_of_theory = None
 
+
         if "OPT" in self.keywords["simple"]:
             self.job_types.append("OPT")
         elif "OPTTS" in self.keywords["simple"]:
@@ -216,7 +219,7 @@ class Orca5:
         elif "ENGRAD" in self.keywords["simple"]:
             self.job_types.append("ENGRAD")
 
-        if "QM/XTB" in self.keywords["simple"]:
+        if "QM/XTB" in self.keywords["simple"] or "QM/QM2" in self.keywords["simple"]:
             self.job_types.append("QMMM")
             qmmm_lvl_of_theory = "QM/XTB"
 
@@ -428,10 +431,11 @@ class Orca5:
         thermochemistry = {}
         single_point = {}
 
-        if "FREQ" in self.job_type_objs.keys():
-            if "OPT" in self.job_type_objs.keys() or self.job_type_objs["FREQ"].neligible_gradient:
-                if temperature in self.job_type_objs["FREQ"].thermo_data:
-                    temp_ = self.job_type_objs["FREQ"].thermo_data[temperature]
+        if temperature in self.freqs.keys():
+            req_freq = self.freqs[temperature]
+            if "OPT" in self.job_type_objs.keys() or req_freq.negligible_gradient:
+                if temperature in req_freq.thermo_data:
+                    temp_ = req_freq.thermo_data[temperature]
                     thermochemistry[self.level_of_theory + "--ZPE"] = temp_["zero point energy"]
                     thermochemistry[self.level_of_theory + "--thermal"] = temp_["total thermal correction"]
                     thermochemistry[self.level_of_theory + "--thermal_enthalpy_corr"] = \
@@ -458,8 +462,8 @@ class Orca5:
                 single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
                 self.labelled_data = {**self.labelled_data, **single_point}
 
-# ORCA5 simple keywords
 
+# ORCA5 simple keywords
 scf_conv_simple_keywords = ("NORMALSCF", "LOOSESCF", "SLOPPYSCF", "STRONGSCF", "TIGHTSCF", "VERYTIGHTSCF",
                             "EXTREMESCF", "SCFCONV")
 
@@ -630,7 +634,7 @@ class Cpcm:
 class Geom:
     def __init__(self):
         """
-
+        TODO indicate if the geometry optimization is a TS search or not
         """
         self.name = "geom"
         self.keywords = {"maxiter": None,
@@ -764,7 +768,7 @@ class Freq:
         self.final_gibbs_free_energy = None
         # If an OPT object is not present but the gradient is less than 5e-6 we consider this frequency to be part of
         # a converged geometry optimization
-        self.neligible_gradient = False
+        self.negligible_gradient = False
         self.geo_from_output = None
 
     def get_thermochemistry(self, lines_, with_opt=False, print_thermo=False):
@@ -940,6 +944,7 @@ class Freq:
                                                "total thermal correction": self.total_thermal_correction,
                                                "thermal Enthalpy correction": self.thermal_enthalpy_correction,
                                                "total entropy correction": self.final_entropy_term,
+                                               "zero point corrected energy": self.elec_energy + self.zero_pt_energy,
                                                "total thermal energy": self.total_thermal_energy,
                                                "total enthalpy": self.total_enthalpy,
                                                "final gibbs free energy": self.final_gibbs_free_energy}
@@ -1044,7 +1049,7 @@ class Scf:
 class Qmmm:
     def __init__(self, qm_spec=None, qm_charge=0, qm_multiplicity=1, total_charge=0, total_multiplicity=1):
         self.name = "qmmm"
-        self.lvl_of_theory:str = ""
+        self.lvl_of_theory: str = ""
         self.keywords = {"qmatoms:": None, "charge_total": total_charge, "multi_total": total_multiplicity,
                          "qm2custommethod": None, "qm2custombasis": None, "qm2customfile": None}
 
