@@ -32,6 +32,13 @@ class Orca5Processor:
                  warning_txt_file=None,
                  error_handling=None
                  ):
+
+        get_opt_steps = False
+        for key in post_process_type:
+            if "get_opt_step" in post_process_type[key]:
+                if post_process_type[key]["get_opt_step"][0].lower() == "yes":
+                    get_opt_steps = True
+
         self.root_folder_path = root_folder_path
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
         self.orca5_in_pd = []
@@ -67,7 +74,7 @@ class Orca5Processor:
                 self.folders_to_orca5[folder] = []
                 for out_file in output_files:
                     time_temp = time.perf_counter()
-                    self.folders_to_orca5[folder].append(Orca5(out_file, grad_cut_off))
+                    self.folders_to_orca5[folder].append(Orca5(out_file, grad_cut_off, get_opt_steps=get_opt_steps))
                     print(f"{out_file} took {time.perf_counter() - time_temp:.2f} s")
             time_end = time.perf_counter()
             print(f"DONE in {time_end - time_start:.2f} sec")
@@ -98,6 +105,8 @@ class Orca5Processor:
                     raise ValueError("Please specific the level of theory!")
 
                 self.process_single_pts(post_process_type[key], to_pinn=to_pinn, level_of_theory=lvl_of_theory)
+            elif key.lower() == "optts analysis":
+                self.process_optts()
 
     @staticmethod
     def orca5_to_pd(orca5_objs_, temperature_=298.15):
@@ -345,6 +354,24 @@ class Orca5Processor:
         suffix = path.basename(self.root_folder_path)
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
+    def process_optts(self):
+        optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
+
+        # Find all the ORCA 5 output that belongs to a optTS job
+        for key in self.folders_to_orca5:
+            temp_obj_lists_ = self.folders_to_orca5[key]
+            for obj in temp_obj_lists_:
+                optts_objs[key] = []
+                if "TS" in obj.job_types:
+                    optts_objs[key].append(obj)
+
+        for key in optts_objs:
+            for obj in optts_objs[key]:
+                for step in obj.job_type_objs["OPT"].opt_steps:
+                    step.find_ts_mode()
+                    for i in step.coords_in_ts:
+                        print(f"{i}  ---  {step.condensed_data[i]}")
+
     def merge_thermo(self, print_thermo_obj, ref_obj):
         """
         Populate the self.freqs Dict in ref_obj
@@ -386,7 +413,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-r", "--root", help="Path of the root folder")
-    parser.add_argument("-t", "--pptype", help="Post processing type. Supported: \"single point\" \"stationary\" ")
+    parser.add_argument("-t", "--pptype", help="Post processing type. Supported: \"single point\" \"stationary\" "
+                                               "\"optts analysis \"")
     parser.add_argument("-i", "--ppinp", help="path to a text file to specific various options for post processing")
     args = parser.parse_args()
 
@@ -401,6 +429,10 @@ if __name__ == "__main__":
 
     if args.pptype == "stationary":
         warning_path = None
+        # We will not get individual optimization step for a stationary post-processing
+        if spec["get_opt_step"].lower() == "yes":
+            spec["get_opt_step"] = "no"
+
         if "warning" in spec:
             # spec["warning"] is a list of str
             if spec["warning"][0].lower() == "here":
@@ -417,3 +449,6 @@ if __name__ == "__main__":
         orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
                                                               {"to_pinn": ["pickle", "energy"],
                                                                "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
+
+    elif args.pptype == "optts analysis":
+        orca5_objs = Orca5Processor(args.root, post_process_type={"optts analysis": spec})

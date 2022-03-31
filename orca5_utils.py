@@ -7,10 +7,11 @@ import time
 from ase import Atoms
 from ase.io import read
 from pathlib import Path
-
+from geo_optimization import OptBond, OptAngle, OptTorsion, Step
 
 # TODO The key case can be very annoying now. Need to ADD an doc here for clarity on the use of CASE
 # self.keywords key: lowercase. self.jobtype key: UPPERCASE
+
 
 class Orca5:
     """
@@ -24,7 +25,9 @@ class Orca5:
                  property_path=None,
                  engrad_path=None,
                  output_path=None,
-                 safety_check=False):
+                 safety_check=False,
+                 allow_incomplete=False,
+                 get_opt_steps=False):
 
         # Get the root name of the orca_out_file
         self.root_name = None
@@ -62,8 +65,8 @@ class Orca5:
         with open(orca_out_file, "r") as f:
             lines = f.readlines()
 
-        # Check if the ORCA 5 output is valid. If not we will not proceed further
-        if "ORCA TERMINATED NORMALLY" in lines[-2]:
+        # Check if the ORCA 5 output is valid. If not we will not proceed further unless allow_incomplete is true
+        if "ORCA TERMINATED NORMALLY" in lines[-2] or allow_incomplete:
             self.completed_job = True
 
         if self.completed_job:
@@ -80,7 +83,11 @@ class Orca5:
             self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
 
             self.determine_jobtype()
-            self.parse_orca5_output(lines[self.input_section["end"]:], grad_cut_off)
+            # Only optTS is allowed for get_opt_steps = True
+            if get_opt_steps and "TS" not in self.job_types:
+                print("WARNING: Only optTS is allowed for get_opt_steps = True ... setting get_opt_steps to False! ")
+                get_opt_steps = False
+            self.parse_orca5_output(lines[self.input_section["end"]:], grad_cut_off, get_opt_steps)
             self.get_level_of_theory()
 
             if self.coord_spec["coord_type"] == "xyzfile":
@@ -110,19 +117,24 @@ class Orca5:
         else:
             self.warnings.append("INCOMPLETE ORCA5 job detect!")
 
-    def parse_orca5_output(self, lines_, grad_cut_off):
+    def parse_orca5_output(self, lines_, grad_cut_off, get_opt_steps):
         """
         job_types will determine what information to extract
         SP: only final single point energy
-        Opt:
+        :param lines_:
+        :param grad_cut_off:
+        :param get_opt_steps: if this is true, then each individual steps of opt will be read
         :return:
-        :rtype:
         """
+
         for job_type in self.job_types:
             if job_type == "SP":
                 self.job_type_objs["SP"].get_final_sp_energy(lines_)
             elif job_type == "OPT":
-                self.job_type_objs["OPT"].get_opt_geo(lines_)
+                if get_opt_steps:
+                    self.job_type_objs["OPT"].get_opt_steps(lines_)
+                else:
+                    self.job_type_objs["OPT"].get_opt_geo(lines_)
                 # TODO read from xyz as an option?
             elif job_type in ("FREQ", "ANFREQ", "NUMFREQ"):
                 if self.method.is_print_thermo:
@@ -206,6 +218,7 @@ class Orca5:
             self.job_types.append("OPT")
         elif "OPTTS" in self.keywords["simple"]:
             self.job_types.append("OPT")
+            self.job_types.append("TS")
 
         if "FREQ" in self.keywords["simple"] or "PRINTTHERMOCHEM" in self.keywords["simple"]:
             self.job_types.append("FREQ")
@@ -655,6 +668,11 @@ class Geom:
         # ASE Atoms object of the optimized geometry. Both has to be equal
         self.geo_from_output = None
         self.geo_from_xyz = None
+        self.int_coords_at_steps = None
+        self.is_optts = False
+
+        # Geometry optmization analysis variables
+        self.opt_steps = None
 
     def get_opt_geo(self, lines_):
         """
@@ -711,6 +729,91 @@ class Geom:
                 start_to_read_xyz += 1
 
         self.geo_from_output = Atoms(elements_seq, positions=cart_coords)
+
+    def get_opt_steps(self, lines_):
+        steps = []
+        current_step = 0
+        red_int_coords_at_steps = {}
+        rms_gradient: float = None
+        max_gradient: float = None
+        rms_step: float = None
+        max_step: float = None
+
+        # Flags to control whether to start reading redundant internal coordinates
+        in_geo_cycle = False
+        in_red_coords_section = False
+        read_red_coords = False
+
+        for line in lines_:
+            if "GEOMETRY OPTIMIZATION CYCLE" in line:
+                current_step = int(line.split()[-2])
+                in_geo_cycle = True
+            elif "RMS gradient " in line and "..." not in line:
+                rms_gradient = float(line.split()[2])
+            elif "MAX gradient" in line and "..." not in line:
+                max_gradient = float(line.split()[2])
+            elif "RMS step" in line:
+                rms_step = float(line.split()[2])
+            elif "MAX step" in line:
+                max_step = float(line.split()[2])
+            elif "Redundant Internal Coordinates" in line and in_geo_cycle:
+                in_red_coords_section = True
+                continue
+
+            if "----------------------------------------------------------------------------" in line \
+                    and in_red_coords_section:
+                if read_red_coords:
+                    in_geo_cycle = False
+                    read_red_coords = False
+                    in_red_coords_section = False
+                    steps.append(Step(rms_gradient, max_gradient, rms_step, max_step, red_int_coords_at_steps))
+                    red_int_coords_at_steps = {}
+                    rms_gradient: float = None
+                    max_gradient: float = None
+                    rms_step: float = None
+                    max_step: float = None
+                    continue
+                else:
+                    read_red_coords = True
+                    continue
+
+            if in_red_coords_section:
+                if read_red_coords:
+                    # Two letters elements such as Br, Cl, Na, etc will affect the spiltting.
+                    temp_ = line.split("(")
+                    index = int(temp_[0].split(".")[0])
+                    int_coords_type = temp_[0][-1]
+                    temp_ = temp_[1].split(")")
+                    if int_coords_type == "B":
+                        left, right = temp_[0].split(",")
+                        red_int_coords_at_steps[index] = OptBond(left[0:2], right[0:2],
+                                                                 left[2:], right[2:])
+                    elif int_coords_type == "A":
+                        atom1, atom2, atom3 = temp_[0].split(",")
+                        red_int_coords_at_steps[index] = OptAngle(atom1[0:2], atom2[0:2], atom3[0:2],
+                                                                  atom1[2:], atom2[2:], atom3[2:])
+                    elif int_coords_type == "D":
+                        atom1, atom2, atom3, atom4 = temp_[0].split(",")
+                        red_int_coords_at_steps[index] = OptTorsion(atom1[0:2], atom2[0:2], atom3[0:2], atom4[0:2],
+                                                                    atom1[2:], atom2[2:], atom3[2:], atom4[2:])
+
+                    temp_ = temp_[1].split()
+                    # temp _ 0: Value
+                    #        1: dE/q
+                    #        2: Step
+                    #        3: New-Value
+                    #        4  omp.(TS mode)
+
+                    red_int_coords_at_steps[index].distance_old = float(temp_[0])
+                    red_int_coords_at_steps[index].gradient = float(temp_[1])
+                    red_int_coords_at_steps[index].step = float(temp_[2])
+                    red_int_coords_at_steps[index].distance_new = float(temp_[3])
+                    try:
+                        red_int_coords_at_steps[index].ts_mode = float(temp_[4])
+                    except IndexError:
+                        continue
+
+        self.opt_steps = steps
 
 
 class Mtr:
@@ -1264,7 +1367,7 @@ def get_orca5_keywords(lines_):
                     value_idx = idx + 1
                     idx_to_exclude = [value_idx]
                     while flatten_lines[value_idx].lower() != "end":
-                        keywords[current_detailed_kw].keywords[current_detailed_kw].append(flatten_lines[value_idx])
+                        keywords[current_detailed_kw].keywords[item_].append(flatten_lines[value_idx])
                         value_idx += 1
                         idx_to_exclude.append(value_idx)
 
