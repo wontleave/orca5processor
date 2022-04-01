@@ -4,6 +4,7 @@ import time
 import json
 import pickle
 import argparse
+import matplotlib.pyplot as plt
 from typing import Dict, List
 from orca5_utils import calc_rmsd_ase_atoms_non_pbs
 from reading_utilis import read_root_folders
@@ -81,6 +82,7 @@ class Orca5Processor:
 
         # Remove Orca 5 objects that are flagged as incomplete with option to delete the corresponding output file
         self.remove_incomplete_job(delete_incomplete_job)
+
         # Post processing according to the process type indicated
         if display_warning:
             self.display_warning(warning_txt_path=warning_txt_file)
@@ -106,7 +108,7 @@ class Orca5Processor:
 
                 self.process_single_pts(post_process_type[key], to_pinn=to_pinn, level_of_theory=lvl_of_theory)
             elif key.lower() == "optts analysis":
-                self.process_optts()
+                self.process_optts(post_process_type[key]["ts_atoms"])
 
     @staticmethod
     def orca5_to_pd(orca5_objs_, temperature_=298.15):
@@ -141,9 +143,12 @@ class Orca5Processor:
                 key, values = line.split("=")
             except ValueError:
                 raise ValueError(f"{line} is in a readable format: key = x y z")
-
             values = values.split()
-            values = [item.strip() for item in values]
+
+            if key.strip().lower() == "ts_atoms":
+                values = [int(item) for item in values]
+            else:
+                values = [item.strip() for item in values]
             specifications[key.strip()] = values.copy()
         return specifications
 
@@ -354,9 +359,11 @@ class Orca5Processor:
         suffix = path.basename(self.root_folder_path)
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
-    def process_optts(self):
+    def process_optts(self, ts_atoms):
         optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
-
+        coords_in_ts_master = {}
+        ts_modes_master = {}
+        failed_jobs = []
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
             temp_obj_lists_ = self.folders_to_orca5[key]
@@ -367,10 +374,43 @@ class Orca5Processor:
 
         for key in optts_objs:
             for obj in optts_objs[key]:
-                for step in obj.job_type_objs["OPT"].opt_steps:
+                for idx, step in enumerate(obj.job_type_objs["OPT"].opt_steps):
                     step.find_ts_mode()
+                    # print(f"Geometry optimization step {idx}")
+                    if len(step.coords_in_ts) == 0:
+                        failed_jobs.append(key)
                     for i in step.coords_in_ts:
-                        print(f"{i}  ---  {step.condensed_data[i]}")
+                        value = step.red_int_coords[step.int_coord_to_idx[i]].distance_old
+                        ts_mode = step.condensed_data[i]
+                        if i not in coords_in_ts_master:
+                            coords_in_ts_master[i] = []
+                            ts_modes_master[i] = []
+                        else:
+                            coords_in_ts_master[i].append(value)
+                            ts_modes_master[i].append(ts_mode)
+
+        # Analyse: if last step of opt has the required ts mode we will use this geometry
+
+        for key in coords_in_ts_master:
+            show = False
+            count = 0
+            for i in key:
+                if i in ts_atoms:
+                    count += 1
+            if count == len(key):
+                show = True
+
+            if show:
+                freq, bin = np.histogram(coords_in_ts_master[key], bins="auto")
+                max_freq_idx = np.argmax(freq)
+                left = bin[max_freq_idx]
+                right = bin[max_freq_idx+1]
+                mid_pt = (left + right)/2
+                print(f"{key} -- {freq[max_freq_idx]} -- between {left:.4f} and {right:.4f} -- midpoint = {mid_pt:.4f}")
+
+        # FAILED objects: those with no ts mode in the required coordinates at any point of the optTS search
+        # remove the *.pbs file
+
 
     def merge_thermo(self, print_thermo_obj, ref_obj):
         """

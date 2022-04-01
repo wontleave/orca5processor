@@ -655,11 +655,12 @@ class Geom:
                          "numhess": None,
                          "recalc_hess": None,
                          "trust": None,
+                         "numhess_centraldiff": None,
                          "scan": [],
                          "modify_internals": [],
                          "constraints": []}
 
-        self.single_value_str = ("numhess", "correlation")
+        self.single_value_str = ("numhess", "correlation", "numhess_centraldiff")
         self.single_value_float = ("trust")
         self.single_value_int = ("maxiter", "gdiismaxeq", "recalc_hess")
         # Multi_values keywords required an "end" to terminate
@@ -792,10 +793,20 @@ class Geom:
                         atom1, atom2, atom3 = temp_[0].split(",")
                         red_int_coords_at_steps[index] = OptAngle(atom1[0:2], atom2[0:2], atom3[0:2],
                                                                   atom1[2:], atom2[2:], atom3[2:])
+
                     elif int_coords_type == "D":
                         atom1, atom2, atom3, atom4 = temp_[0].split(",")
                         red_int_coords_at_steps[index] = OptTorsion(atom1[0:2], atom2[0:2], atom3[0:2], atom4[0:2],
                                                                     atom1[2:], atom2[2:], atom3[2:], atom4[2:])
+
+                    elif int_coords_type == "L":
+                        try:
+                            atom1, atom2, atom3, atom4, part = temp_[0].split(",")
+                            red_int_coords_at_steps[index] = OptTorsion(atom1[0:2], atom2[0:2], atom3[0:2], atom4[0:2],
+                                                                        atom1[2:], atom2[2:], atom3[2:], atom4[2:],
+                                                                        part=part)
+                        except ValueError:
+                            raise ValueError(f"{temp_[0]}")
 
                     temp_ = temp_[1].split()
                     # temp _ 0: Value
@@ -808,6 +819,7 @@ class Geom:
                     red_int_coords_at_steps[index].gradient = float(temp_[1])
                     red_int_coords_at_steps[index].step = float(temp_[2])
                     red_int_coords_at_steps[index].distance_new = float(temp_[3])
+
                     try:
                         red_int_coords_at_steps[index].ts_mode = float(temp_[4])
                     except IndexError:
