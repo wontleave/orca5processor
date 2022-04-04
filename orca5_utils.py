@@ -1,8 +1,10 @@
+import pathlib
 import re
 from rmsd import reorder_inertia_hungarian, rmsd
 from os import path
 from typing import Dict, List
 import numpy as np
+import pandas as pd
 import time
 from ase import Atoms
 from ase.io import read
@@ -674,6 +676,12 @@ class Geom:
 
         # Geometry optmization analysis variables
         self.opt_steps = None
+        self.req_int_coords_idx = []
+        self.req_data_pd = None  # Multi-index dataframe row-step index columns:
+        # 0 - required_index, level 1 - value, TS mode
+        self.values_diff = None  # The difference between the i and i+1 step in the optimization divide by the distance
+        self.action = None  # An Action object to indicate what to do with this job
+        self.opt_trj: List[Atoms] = None
 
     def get_opt_geo(self, lines_):
         """
@@ -826,6 +834,46 @@ class Geom:
                         continue
 
         self.opt_steps = steps
+
+    def get_req_int_coords_idx(self, ts_atoms):
+        for i in ts_atoms:
+            for j in ts_atoms:
+                if i > j:
+                    if (i, j) in self.opt_steps[0].condensed_data:
+                        self.req_int_coords_idx.append((i, j))
+
+    def steps_to_pd(self, ts_atoms):
+        """
+        Create a multi-index dataframe
+        :param ts_atoms: used to determine if an internal coordinate is to be included
+        :type ts_atoms: List[int]
+        :return:
+        """
+        self.get_req_int_coords_idx(ts_atoms)
+        int_coords_detail = ["value", "TS mode"]
+        row_idx = list(range(1, len(self.opt_steps)+1))
+        index = pd.MultiIndex.from_product([self.req_int_coords_idx, int_coords_detail],
+                                            names=["required int coords", "details"])
+
+        ordered_data = []
+
+        for step in self.opt_steps:
+            data = []
+            for req_idx in self.req_int_coords_idx:
+                idx = step.int_coord_to_idx[req_idx]
+                data.append(step.red_int_coords[idx].distance_old)
+                data.append(step.red_int_coords[idx].ts_mode)
+            ordered_data.append(data.copy())
+
+        self.req_data_pd = pd.DataFrame(ordered_data, index=row_idx, columns=index)
+
+    def get_opt_trj(self, trj_full_path):
+        """
+
+        :param trj_full_path:
+        :return: Atoms
+        """
+        self.opt_trj = read(trj_full_path, index=':')
 
 
 class Mtr:

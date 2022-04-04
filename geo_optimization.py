@@ -1,3 +1,7 @@
+import glob
+from os import path, remove
+
+
 class Step:
     def __init__(self, rms_gradient, max_gradient, rms_step, max_step, red_int_coords):
         self.rms_gradient = rms_gradient
@@ -10,6 +14,9 @@ class Step:
         self.int_coord_to_idx = {}
 
     def find_ts_mode(self):
+        """
+
+        """
         condensed_data = {}
         for idx, coord_index in enumerate(self.red_int_coords):
             req_indices = self.red_int_coords[coord_index].get_indices()
@@ -84,3 +91,25 @@ class OptTorsion(Opt):
 
     def get_indices(self):
         return self.index1, self.index2, self.index3, self.index4
+
+
+class Action:
+    """
+    Class to control what to do for the next cycle of TS search
+    Current support action:
+        1) use last geometry - changes in internal coordinates which are involved in TS is decreasing and
+           their TS modes > 0
+        2) use x th geoemetry - if TS mode disappears. Will also decrease recalc_hess by 50%
+        3) exclude - no viable step to continue the optTS search
+    """
+    def __init__(self):
+        self.exclude = False
+        self.partial_req_ts_mode = False
+        self.geo_to_use = -1  # Last geometry by default
+
+    @staticmethod
+    def delete_pbs(root_path):
+        pbs_full_path = path.join(root_path, "*.pbs")
+        files_to_delete = glob.glob(pbs_full_path)
+        for file in files_to_delete:
+            remove(file)

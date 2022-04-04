@@ -1,7 +1,11 @@
+from itertools import groupby
+
 import openpyxl
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from os import path
 from orca5_utils import Orca5
 
 
@@ -155,7 +159,7 @@ def orca_to_excel(orca_objs, excel_filename="default.xlsx", temperature=298.15, 
         if len(temp) == 1:
             for idx in range(len_of_all_labels[0]):
                 temp = [label[idx] for label in all_labels]
-                if len(list(groupby(temp))) > 1:
+                if len(list(groupby(temp))) > 1:  # TODO where is groupby from pd or Itertool?
                     print(f"WARNING inconsistent labeling found in orca objects {labels} ... "
                           f"excel file will NOT be writtent")
                     break
@@ -175,3 +179,48 @@ def orca_to_excel(orca_objs, excel_filename="default.xlsx", temperature=298.15, 
 
     wb.save(excel_filename)
     wb.close()
+
+
+def modify_orca_input(input_path, **kwargs):
+    """
+
+    :param input_path:
+    :param kwargs: a dictionary of input keywords to modify
+    :return:
+    """
+    with open(input_path, "r") as f:
+        lines = f.readlines()
+
+    change_max_iter = False
+    if "recalc_hess" in kwargs:
+        new_max_iter = kwargs["recalc_hess"] * 2 - 1
+        change_max_iter = True
+
+    new_input = ""
+
+    for line in lines:
+        if "recalc_hess" in line.lower():
+            new_recalc_hess = kwargs["recalc_hess"]
+            new_input += f"\trecalc_hess {new_recalc_hess}\n"
+        elif change_max_iter and "maxiter" in line.lower():
+            new_input += f"\tMaxIter {new_max_iter}\n"
+            change_max_iter = False
+        elif "xyzfile" in line.lower():
+            if kwargs["xyz_path"] not in line:
+                temp_ = line.strip().split()
+                xyz_name = kwargs["xyz_path"]
+                new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
+                new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {new_xyz_path}\n"
+        else:
+            if "#" not in line and line != "\n" and line != "\t\n":
+                if "!" in line or "%" in line or "*" in line:
+                    new_input += f"{line.strip()}\n"
+                elif "end" in line.lower():
+                    temp_ = line.strip()
+                    if temp_.lower() == "end":
+                        new_input += f"{temp_}\n"
+                else:
+                    new_input += f"\t{line.strip()}\n"
+
+    with open(input_path, "w") as f:
+        f.writelines(new_input)
