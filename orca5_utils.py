@@ -85,10 +85,10 @@ class Orca5:
             self.root_name, _ = path.splitext(self.input_name)  # Join with .engrad to get the engrad if needed
 
             self.determine_jobtype()
-            # Only optTS is allowed for get_opt_steps = True
-            if get_opt_steps and "TS" not in self.job_types:
-                print("WARNING: Only optTS is allowed for get_opt_steps = True ... setting get_opt_steps to False! ")
-                get_opt_steps = False
+            # TODO Only optTS is allowed for get_opt_steps = True
+            # if get_opt_steps and "TS" not in self.job_types:
+            #     print("WARNING: Only optTS is allowed for get_opt_steps = True ... setting get_opt_steps to False! ")
+            #     get_opt_steps = False
             self.parse_orca5_output(lines[self.input_section["end"]:], grad_cut_off, get_opt_steps)
             self.get_level_of_theory()
 
@@ -675,6 +675,7 @@ class Geom:
         self.is_optts = False
 
         # Geometry optmization analysis variables
+        self.converged = False
         self.opt_steps = None
         self.req_int_coords_idx = []
         self.req_data_pd = None  # Multi-index dataframe row-step index columns:
@@ -741,8 +742,9 @@ class Geom:
 
     def get_opt_steps(self, lines_):
         steps = []
-        current_step = 0
+        converged = False
         red_int_coords_at_steps = {}
+        energy_change: float = None
         rms_gradient: float = None
         max_gradient: float = None
         rms_step: float = None
@@ -757,6 +759,8 @@ class Geom:
             if "GEOMETRY OPTIMIZATION CYCLE" in line:
                 current_step = int(line.split()[-2])
                 in_geo_cycle = True
+            elif "Energy change" in line and "..." not in line:
+                energy_change = float(line.split()[2])
             elif "RMS gradient " in line and "..." not in line:
                 rms_gradient = float(line.split()[2])
             elif "MAX gradient" in line and "..." not in line:
@@ -765,6 +769,9 @@ class Geom:
                 rms_step = float(line.split()[2])
             elif "MAX step" in line:
                 max_step = float(line.split()[2])
+            elif "THE OPTIMIZATION HAS CONVERGED" in line:
+                converged = True
+                break
             elif "Redundant Internal Coordinates" in line and in_geo_cycle:
                 in_red_coords_section = True
                 continue
@@ -829,11 +836,15 @@ class Geom:
                     red_int_coords_at_steps[index].distance_new = float(temp_[3])
 
                     try:
-                        red_int_coords_at_steps[index].ts_mode = float(temp_[4])
+                        if temp_[4] == "C":
+                            red_int_coords_at_steps[index].constrained = True
+                        else:
+                            red_int_coords_at_steps[index].ts_mode = float(temp_[4])
                     except IndexError:
                         continue
 
         self.opt_steps = steps
+        self.converged = converged
 
     def get_req_int_coords_idx(self, ts_atoms):
         for i in ts_atoms:

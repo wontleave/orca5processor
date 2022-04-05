@@ -209,16 +209,23 @@ def modify_orca_input(input_path, **kwargs):
             if kwargs["xyz_path"] not in line:
                 temp_ = line.strip().split()
                 xyz_name = kwargs["xyz_path"]
-                new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
+                prefix_for_path = path.dirname(temp_[-1])
+                if prefix_for_path == "":
+                    new_xyz_path = f"{xyz_name}"  # Only linux for now
+                else:
+                    new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
                 new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {new_xyz_path}\n"
         else:
             if "#" not in line and line != "\n" and line != "\t\n":
+                # TODO # present anywhere in the line will result in the line being excluded
                 if "!" in line or "%" in line or "*" in line:
                     new_input += f"{line.strip()}\n"
                 elif "end" in line.lower():
                     temp_ = line.strip()
                     if temp_.lower() == "end":
                         new_input += f"{temp_}\n"
+                    else:
+                        new_input += f"\t{temp_}\n"
                 else:
                     new_input += f"\t{line.strip()}\n"
 

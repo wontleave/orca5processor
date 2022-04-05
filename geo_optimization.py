@@ -1,5 +1,8 @@
 import glob
-from os import path, remove
+import subprocess
+import time
+from os import path, remove, chdir
+from pathlib import Path
 
 
 class Step:
@@ -35,6 +38,7 @@ class Opt:
         self.gradient = None
         self.step = None
         self.ts_mode = 0.0
+        self.constrained = False
 
 
 class OptBond(Opt):
@@ -113,3 +117,5 @@ class Action:
         files_to_delete = glob.glob(pbs_full_path)
         for file in files_to_delete:
             remove(file)
+
+
