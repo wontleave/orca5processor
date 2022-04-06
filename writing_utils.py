@@ -199,15 +199,18 @@ def modify_orca_input(input_path, **kwargs):
     new_input = ""
 
     for line in lines:
-        if "recalc_hess" in line.lower():
+        _line = line.strip()
+        if len(_line) == 0:
+            continue
+        if "recalc_hess" in _line.lower():
             new_recalc_hess = kwargs["recalc_hess"]
             new_input += f"\trecalc_hess {new_recalc_hess}\n"
-        elif change_max_iter and "maxiter" in line.lower():
+        elif change_max_iter and "maxiter" in _line.lower():
             new_input += f"\tMaxIter {new_max_iter}\n"
             change_max_iter = False
-        elif "xyzfile" in line.lower():
-            if kwargs["xyz_path"] not in line:
-                temp_ = line.strip().split()
+        elif "xyzfile" in _line.lower():
+            if kwargs["xyz_path"] not in _line:
+                temp_ = _line.split()
                 xyz_name = kwargs["xyz_path"]
                 prefix_for_path = path.dirname(temp_[-1])
                 if prefix_for_path == "":
@@ -216,18 +219,17 @@ def modify_orca_input(input_path, **kwargs):
                     new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
                 new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {new_xyz_path}\n"
         else:
-            if "#" not in line and line != "\n" and line != "\t\n":
+            if _line[0] != "#":
                 # TODO # present anywhere in the line will result in the line being excluded
-                if "!" in line or "%" in line or "*" in line:
-                    new_input += f"{line.strip()}\n"
-                elif "end" in line.lower():
-                    temp_ = line.strip()
-                    if temp_.lower() == "end":
-                        new_input += f"{temp_}\n"
+                if _line[0] == "!" or _line[0] == "%" or _line[0] == "*":
+                    new_input += f"{_line}\n"
+                elif "end" in _line.lower():
+                    if _line.lower() == "end":
+                        new_input += f"{_line}\n"
                     else:
-                        new_input += f"\t{temp_}\n"
+                        new_input += f"\t{_line}\n"
                 else:
-                    new_input += f"\t{line.strip()}\n"
+                    new_input += f"\t{_line.strip()}\n"
 
     with open(input_path, "w") as f:
         f.writelines(new_input)
