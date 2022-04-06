@@ -56,28 +56,33 @@ class Orca5Processor:
                 grad_cut_off = 1e-5
 
         # Determine which folder has the orca output
+
         for folder in all_folders:
             time_start = time.perf_counter()
             print(f"Working on {folder} ....", end="")
             files = listdir(folder)
-            output_files = []
-            for file in files:
-                output_files = [path.join(folder, file) for file in files if
-                                "wlm01" in file or
-                                "coronab" in file or
-                                "lic01" in file or
-                                "hpc-mn1" in file
-                                ]  # these are the supported extension
+            output_files = [path.join(folder, file) for file in files if
+                            "wlm01" in file or
+                            "coronab" in file or
+                            "lic01" in file or
+                            "hpc-mn1" in file
+                            ]  # these are the supported extension
 
             # Each valid output file should correspond to an Orca 5 calculation.
             # Multiple output files can be present in a folder. For instance. OptTS + NumHess + multiple single point
+            if "optts analysis" in post_process_type:
+                allow_incomplete = True
+            else:
+                allow_incomplete = False
+
             if len(output_files) == 0:
                 self.folders_to_orca5[folder] = None  # This folder has no valid output file
             else:
                 self.folders_to_orca5[folder] = []
                 for out_file in output_files:
                     time_temp = time.perf_counter()
-                    self.folders_to_orca5[folder].append(Orca5(out_file, grad_cut_off, get_opt_steps=get_opt_steps))
+                    self.folders_to_orca5[folder].append(Orca5(out_file, grad_cut_off, get_opt_steps=get_opt_steps,
+                                                               allow_incomplete=allow_incomplete))
                     print(f"{out_file} took {time.perf_counter() - time_temp:.2f} s")
             time_end = time.perf_counter()
             print(f"DONE in {time_end - time_start:.2f} sec")
@@ -85,7 +90,7 @@ class Orca5Processor:
         # Remove Orca 5 objects that are flagged as incomplete with option to delete the corresponding output file
         self.remove_incomplete_job(delete_incomplete_job)
 
-        # Post processing according to the process type indicated
+        # Post-processing according to the process type indicated
         if display_warning:
             self.display_warning(warning_txt_path=warning_txt_file)
 
@@ -110,7 +115,7 @@ class Orca5Processor:
 
                 self.process_single_pts(post_process_type[key], to_pinn=to_pinn, level_of_theory=lvl_of_theory)
             elif key.lower() == "optts analysis":
-                self.process_optts(post_process_type[key]["ts_atoms"])
+                self.process_optts(post_process_type[key]["ts_int_coords"])
 
     @staticmethod
     def orca5_to_pd(orca5_objs_, temperature_=298.15):
@@ -361,10 +366,11 @@ class Orca5Processor:
         suffix = path.basename(self.root_folder_path)
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
-    def process_optts(self, ts_atoms):
+    def process_optts(self, int_coords_from_spec):
         optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
         coords_in_ts_master = {}
         ts_modes_master = {}
+        req_int_coords = None
 
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
@@ -376,7 +382,7 @@ class Orca5Processor:
                     if "QMMM" in obj.job_types:
                         trj_filename = obj.root_name + ".activeRegion_trj.xyz"
                     else:
-                        trj_filename = obj.root_name + "trj.xyz"
+                        trj_filename = obj.root_name + "_trj.xyz"
                     trj_full_path = path.join(obj.root_path, trj_filename)
                     obj.job_type_objs["OPT"].get_opt_trj(trj_full_path)
 
@@ -395,7 +401,9 @@ class Orca5Processor:
                             coords_in_ts_master[i].append(value)
                             ts_modes_master[i].append(ts_mode)
 
-                obj.job_type_objs["OPT"].steps_to_pd(ts_atoms)
+                obj.job_type_objs["OPT"].steps_to_pd(int_coords_from_spec)
+                if req_int_coords is None:
+                    req_int_coords = obj.job_type_objs["OPT"].req_int_coords_idx
                 ts_mode_only_df = obj.job_type_objs["OPT"].req_data_pd.xs("TS mode", level=1, axis=1)
                 all_req_int_coords_ts_mode_at_step = ts_mode_only_df.all(axis=1)
                 any_req_int_coords_ts_mode_at_step = ts_mode_only_df.any(axis=1)
@@ -422,13 +430,8 @@ class Orca5Processor:
 
         for key in coords_in_ts_master:
             show = False
-            count = 0
-            for i in key:
-                if i in ts_atoms:
-                    count += 1
-            if count == len(key):
+            if key in req_int_coords:
                 show = True
-
             if show:
                 freq, bin = np.histogram(coords_in_ts_master[key], bins="auto")
                 max_freq_idx = np.argmax(freq)

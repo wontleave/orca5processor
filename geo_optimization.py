@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 class Step:
-    def __init__(self, rms_gradient, max_gradient, rms_step, max_step, red_int_coords):
+    def __init__(self, energy_change, rms_gradient, max_gradient, rms_step, max_step, red_int_coords):
+        self.energy_change = energy_change
         self.rms_gradient = rms_gradient
         self.max_gradient = max_gradient
         self.rms_step = rms_step

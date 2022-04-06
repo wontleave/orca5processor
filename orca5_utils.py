@@ -111,7 +111,8 @@ class Orca5:
             # compare the geometry from output and from xyzfile if necessary
             if self.geo_from_xyz is not None and \
                     not self.method.is_qmmm and \
-                    not self.method.is_print_thermo:
+                    not self.method.is_print_thermo and\
+                    not allow_incomplete:
                 # TODO check the QM atoms with the corresponding atom in the xyzfile
                 rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
                 if rmsd_ > 1e-5:
@@ -782,7 +783,8 @@ class Geom:
                     in_geo_cycle = False
                     read_red_coords = False
                     in_red_coords_section = False
-                    steps.append(Step(rms_gradient, max_gradient, rms_step, max_step, red_int_coords_at_steps))
+                    steps.append(Step(energy_change, rms_gradient, max_gradient, rms_step, max_step,
+                                      red_int_coords_at_steps))
                     red_int_coords_at_steps = {}
                     rms_gradient: float = None
                     max_gradient: float = None
@@ -846,21 +848,29 @@ class Geom:
         self.opt_steps = steps
         self.converged = converged
 
-    def get_req_int_coords_idx(self, ts_atoms):
-        for i in ts_atoms:
-            for j in ts_atoms:
-                if i > j:
-                    if (i, j) in self.opt_steps[0].condensed_data:
-                        self.req_int_coords_idx.append((i, j))
+    def get_req_int_coords_idx(self, int_coords_from_spec):
+        for coords in int_coords_from_spec:
+            num_dash = coords.count("-")
+            if num_dash == 1:
+                atom1, atom2 = coords.split("-")
+                self.req_int_coords_idx.append((int(atom1), int(atom2)))
+            elif num_dash == 2:
+                atom1, atom2, atom3 = coords.split("-")
+                self.req_int_coords_idx.append((int(atom1), int(atom2), int(atom3)))
+            elif num_dash == 3:
+                atom1, atom2, atom3, atom4 = coords.split("-")
+                self.req_int_coords_idx.append((int(atom1), int(atom2), int(atom3), int(atom4)))
+            else:
+                raise ValueError(f"{num_dash} \"-\" was found. This is not a valid internal coordinate")
 
-    def steps_to_pd(self, ts_atoms):
+    def steps_to_pd(self, int_coords_from_spec):
         """
         Create a multi-index dataframe
-        :param ts_atoms: used to determine if an internal coordinate is to be included
-        :type ts_atoms: List[int]
+        :param int_coords_from_spec: used to determine if an internal coordinate is to be included as given in ppinp.txt
+        :type int_coords_from_spec: List[str]
         :return:
         """
-        self.get_req_int_coords_idx(ts_atoms)
+        self.get_req_int_coords_idx(int_coords_from_spec)
         int_coords_detail = ["value", "TS mode"]
         row_idx = list(range(1, len(self.opt_steps)+1))
         index = pd.MultiIndex.from_product([self.req_int_coords_idx, int_coords_detail],
