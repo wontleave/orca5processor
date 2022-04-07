@@ -11,7 +11,7 @@ from ase.io import read
 from pathlib import Path
 from geo_optimization import OptBond, OptAngle, OptTorsion, Step
 
-# TODO The key case can be very annoying now. Need to ADD an doc here for clarity on the use of CASE
+# Explanation on the use of case:
 # self.keywords key: lowercase. self.jobtype key: UPPERCASE
 
 

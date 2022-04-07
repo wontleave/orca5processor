@@ -202,7 +202,7 @@ def modify_orca_input(input_path, **kwargs):
         _line = line.strip()
         if len(_line) == 0:
             continue
-        if "recalc_hess" in _line.lower():
+        if "recalc_hess" in _line.lower() and "recalc_hess" in kwargs:
             new_recalc_hess = kwargs["recalc_hess"]
             new_input += f"\trecalc_hess {new_recalc_hess}\n"
         elif change_max_iter and "maxiter" in _line.lower():
@@ -218,6 +218,8 @@ def modify_orca_input(input_path, **kwargs):
                 else:
                     new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
                 new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {new_xyz_path}\n"
+            else:
+                new_input += f"{_line}\n"
         else:
             if _line[0] != "#":
                 # TODO # present anywhere in the line will result in the line being excluded

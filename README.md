@@ -8,3 +8,4 @@ Support to write single point calculations to format that is suitable for PiNN t
 
 Version 1.1.0
 TS analysis added: optTS job in each folder will be analyzed and determined if the job should be continued
+Automatic Optimization implemented

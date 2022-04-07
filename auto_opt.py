@@ -41,6 +41,10 @@ class AutoGeoOpt:
         for key in self.spec:
             if key.upper() == "COPT" or key.upper() == "OPTTS" or key.upper() == "NUMHESS" or key.upper() == "ANHESS":
                 self.inputs[key.upper()] = self.spec[key]
+            elif key.lower() == "job_sequence":
+                self.spec[key] =  self.spec[key].split()
+            elif key.lower() == "job_max_try":
+                self.spec[key] = [int(item) for item in self.spec[key].split()]
 
     def run_job(self, job_type):
         """
@@ -65,30 +69,54 @@ class AutoGeoOpt:
         t_end = time.perf_counter()
         return output_path_, t_end - t_start
 
-    def perform_task(self):
+    def perform_tasks(self):
         """
-
+        TODO add detail of each task: OPT - convergence criteria, OPTTS - OPT + required int coords
+        Perform the task(s) as given by the job_sequence key in spec.txt
         :return:
         """
-        for task in self.spec["job_sequence"]:
-            self.run_job(task)
-            req_coord_path = Path(auto.current_input_path).stem + ".xyz"
-            input_spec = {"xyz_path": req_coord_path}
-            modify_orca_input(auto.current_input_path, **input_spec)
+        for task_idx, task in enumerate(self.spec["job_sequence"]):
+            if "HESS" in task:
+                total_time_taken = 0.0
+                self.run_job(task)
+                output_path, time_taken = self.run_job(task)
+                total_time_taken += time_taken
+                orca5 = Orca5(output_path, 2e-5, allow_incomplete=False, get_opt_steps=False)
+                if orca5.completed_job:  # A valid output file needs to have ORCA TERMINATED NORMALLY
+                    print(f"{task} is done in {total_time_taken}")
+                else:
+                    print(f"{task} failed!")
+            else:
+                print(f"Performing {task} ...")
+                total_time_taken = 0.0
+                converged = False
+                output_path, time_taken = self.run_job(task)
+                total_time_taken += time_taken
+                orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
+                req_coord_path = Path(auto.current_input_path).stem + ".xyz"
+                input_spec = {"xyz_path": req_coord_path}
+                modify_orca_input(auto.current_input_path, **input_spec)
+                run_count = 1
+                for i in range(self.spec["job_max_try"][task_idx]):
+                    output_path, time_taken = auto.run_job(task)
+                    orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
+                    print(f"Run {run_count} took {time_taken:.2f} s")
+                    run_count += 1
+                    if orca5.job_type_objs["OPT"].converged:
+                        converged = True
+                        break
+                if converged:
+                    print(f"---------- {task} completes in {run_count} cycles(s). "
+                          f"Total time taken is {total_time_taken:.2f}s")
+                else:
+                    print(f"---------- {task} failed after {run_count} cycles(s). "
+                          f"Total time taken is {total_time_taken:.2f}s")
+                    print("We won't proceed to the next task!")
+                    break
 
 
 if __name__ == "__main__":
-    req_folder = r"/home/wontleave/calc/TCH_SCIENCE/TS_S_SN2/0"
+    req_folder = r"/media/tch/7b8ddedc-3e55-4de2-a2e7-d4aa99ad1f9d/calc/AUTO_TEST/DEBUG/1"
     auto = AutoGeoOpt(req_folder)
-    current_job_type = "COPT"
-    output_path, time_taken = auto.run_job(current_job_type)
-    orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
-    req_coord_path = Path(auto.current_input_path).stem + ".xyz"
-    input_spec = {"xyz_path": req_coord_path}
-    modify_orca_input(auto.current_input_path, **input_spec)
-    run_count = 1
-    while not orca5.job_type_objs["OPT"].converged:
-        output_path, time_taken = auto.run_job(current_job_type)
-        orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
-        print(f"Run {run_count} took {time_taken:.2f} s")
-        run_count += 1
+    auto.perform_tasks()
+
