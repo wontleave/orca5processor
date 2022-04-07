@@ -209,15 +209,10 @@ def modify_orca_input(input_path, **kwargs):
             new_input += f"\tMaxIter {new_max_iter}\n"
             change_max_iter = False
         elif "xyzfile" in _line.lower():
-            if kwargs["xyz_path"] not in _line:
-                temp_ = _line.split()
+            temp_ = _line.split()
+            if kwargs["xyz_path"] != temp_[-1]:
                 xyz_name = kwargs["xyz_path"]
-                prefix_for_path = path.dirname(temp_[-1])
-                if prefix_for_path == "":
-                    new_xyz_path = f"{xyz_name}"  # Only linux for now
-                else:
-                    new_xyz_path = f"{path.dirname(temp_[-1])}/{xyz_name}"  # Only linux for now
-                new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {new_xyz_path}\n"
+                new_input += f"{temp_[0]} {temp_[1]} {temp_[2]} {temp_[3]} {xyz_name}\n"
             else:
                 new_input += f"{_line}\n"
         else:

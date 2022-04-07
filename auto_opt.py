@@ -1,5 +1,7 @@
 import subprocess
 import time
+import numpy as np
+import pandas as pd
 from os import path, chdir
 from pathlib import Path
 from orca5_utils import Orca5
@@ -15,12 +17,18 @@ class AutoGeoOpt:
         self.folder_path = folder_path
         self.spec = {}
         self.inputs = {}
-        self.time_taken = None
         self.read_spec()
 
         # Dynamics variables that change during the run
         self.current_input_path: str = None
 
+        # For creation of multi-index dataframe to manage time taken
+        self.time_taken: list[float] = []
+        self.job_type_labels: list[str] = []
+        self.iter_labels: list[int] = []
+        self.times_df = None
+
+        # Determine the state of the job
     def read_spec(self):
         """
         Provides the command to execute ORCA5,
@@ -39,12 +47,13 @@ class AutoGeoOpt:
             self.spec[key.strip()] = value.strip()
 
         for key in self.spec:
-            if key.upper() == "COPT" or key.upper() == "OPTTS" or key.upper() == "NUMHESS" or key.upper() == "ANHESS":
-                self.inputs[key.upper()] = self.spec[key]
-            elif key.lower() == "job_sequence":
+            if key.lower() == "job_sequence":
                 self.spec[key] =  self.spec[key].split()
             elif key.lower() == "job_max_try":
                 self.spec[key] = [int(item) for item in self.spec[key].split()]
+
+        for job_type in self.spec["job_sequence"]:
+            self.inputs[job_type] = self.spec[job_type]
 
     def run_job(self, job_type):
         """
@@ -72,51 +81,86 @@ class AutoGeoOpt:
     def perform_tasks(self):
         """
         TODO add detail of each task: OPT - convergence criteria, OPTTS - OPT + required int coords
+        TODO determine if there is a need to include a prefix for the xyzfile (i.e. in singularity container)
         Perform the task(s) as given by the job_sequence key in spec.txt
         :return:
         """
         for task_idx, task in enumerate(self.spec["job_sequence"]):
+            print(f"Performing {task} ...")
+            # Bookkeeping
+            iter_counter = 0
+            if task_idx > 0:
+                req_coord_path = Path(auto.current_input_path).stem + ".xyz"
+                input_spec = {"xyz_path": req_coord_path}
+                next_input_path = path.join(self.folder_path, self.inputs[task])
+                modify_orca_input(next_input_path, **input_spec)
+
             if "HESS" in task:
-                total_time_taken = 0.0
                 self.run_job(task)
                 output_path, time_taken = self.run_job(task)
-                total_time_taken += time_taken
                 orca5 = Orca5(output_path, 2e-5, allow_incomplete=False, get_opt_steps=False)
+
+                # Bookkeeping
+                iter_counter += 1
+                self.job_type_labels.append(task)
+                self.iter_labels.append(iter_counter)
+                self.time_taken.append(time_taken)
+
                 if orca5.completed_job:  # A valid output file needs to have ORCA TERMINATED NORMALLY
-                    print(f"{task} is done in {total_time_taken}")
+                    print(f"{task} is done in {time_taken:.2f}")
                 else:
                     print(f"{task} failed!")
             else:
-                print(f"Performing {task} ...")
-                total_time_taken = 0.0
                 converged = False
                 output_path, time_taken = self.run_job(task)
-                total_time_taken += time_taken
                 orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
-                req_coord_path = Path(auto.current_input_path).stem + ".xyz"
-                input_spec = {"xyz_path": req_coord_path}
-                modify_orca_input(auto.current_input_path, **input_spec)
-                run_count = 1
+
+                # Bookkeeping
+                iter_counter += 1
+                print(f"Run {iter_counter} took {time_taken:.2f} s")
+                self.job_type_labels.append(task)
+                self.iter_labels.append(iter_counter)
+                self.time_taken.append(time_taken)
+
+                if orca5.job_type_objs["OPT"].converged:
+                    print(f"---------- {task} is completed in {iter_counter} cycles(s). "
+                          f"Total time taken is {np.sum(self.time_taken):.2f}s")
+                    continue
+                else:
+                    req_coord_path = Path(auto.current_input_path).stem + ".xyz"
+                    input_spec = {"xyz_path": req_coord_path}
+                    modify_orca_input(auto.current_input_path, **input_spec)
+
                 for i in range(self.spec["job_max_try"][task_idx]):
                     output_path, time_taken = auto.run_job(task)
                     orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
-                    print(f"Run {run_count} took {time_taken:.2f} s")
-                    run_count += 1
+                    iter_counter += 1
+                    print(f"Run {iter_counter} took {time_taken:.2f} s")
+                    self.job_type_labels.append(task)
+                    self.iter_labels.append(iter_counter)
+                    self.time_taken.append(time_taken)
                     if orca5.job_type_objs["OPT"].converged:
+                        print(f"---------- {task} is completed in {iter_counter} cycles(s). "
+                              f"Total time taken is {np.sum(self.time_taken):.2f}s")
                         converged = True
                         break
-                if converged:
-                    print(f"---------- {task} completes in {run_count} cycles(s). "
-                          f"Total time taken is {total_time_taken:.2f}s")
-                else:
-                    print(f"---------- {task} failed after {run_count} cycles(s). "
-                          f"Total time taken is {total_time_taken:.2f}s")
+
+                if not converged:
+                    print(f"---------- {task} has failed after {iter_counter} cycles(s). "
+                          f"Total time taken is {np.sum(self.time_taken):.2f}s")
                     print("We won't proceed to the next task!")
                     break
 
+        # Create the dataframe for time taken bookkeeping
+        tuples = list(zip(*[self.job_type_labels, self.iter_labels]))
+        index = pd.MultiIndex.from_tuples(tuples, names=["Job Type", "Iter"])
+        self.times_df = pd.DataFrame(self.time_taken, index=index, columns=["Time (s)"])
+
 
 if __name__ == "__main__":
-    req_folder = r"/media/tch/7b8ddedc-3e55-4de2-a2e7-d4aa99ad1f9d/calc/AUTO_TEST/DEBUG/1"
+    req_folder = r"/home/wontleave/calc/autoopt/methylBr_F"
     auto = AutoGeoOpt(req_folder)
     auto.perform_tasks()
+    print(auto.times_df)
+    print(f"{auto.times_df.sum()}")
 
