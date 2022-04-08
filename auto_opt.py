@@ -2,10 +2,13 @@ import subprocess
 import time
 import numpy as np
 import pandas as pd
+import shutil
 from os import path, chdir
 from pathlib import Path
 from orca5_utils import Orca5
 from writing_utils import modify_orca_input
+from reading_utilis import read_root_folders
+from pprint import pprint
 
 
 class AutoGeoOpt:
@@ -17,7 +20,6 @@ class AutoGeoOpt:
         self.folder_path = folder_path
         self.spec = {}
         self.inputs = {}
-        self.read_spec()
 
         # Dynamics variables that change during the run
         self.current_input_path: str = None
@@ -55,6 +57,30 @@ class AutoGeoOpt:
         for job_type in self.spec["job_sequence"]:
             self.inputs[job_type] = self.spec[job_type]
 
+    def copy_req_files(self, root_folder):
+        """
+        In the case if self.identical is True. The required input files and spec.txt will be copied to all subfolders
+        :param root_folder: from BatchJobs object
+        :type root_folder: str
+        :return:
+        """
+        root = Path(root_folder)
+        spec_path = root.joinpath("spec.txt")
+        if spec_path.is_file():
+            destination_path = (Path(self.folder_path)).joinpath("spec.txt")
+            shutil.copyfile(spec_path.resolve(), destination_path)
+        else:
+            raise Exception("We can't find {spec_path.resolve()}!")
+
+        self.read_spec()
+        for key in self.inputs:
+            req_input_path = root.joinpath(self.inputs[key])
+            if req_input_path.is_file():
+                destination_path = (Path(self.folder_path)).joinpath(self.inputs[key])
+                shutil.copyfile(req_input_path.resolve(), destination_path)
+            else:
+                raise Exception(f"We can't find {req_input_path.resolve()}!")
+
     def run_job(self, job_type):
         """
         Execute the calculation
@@ -90,7 +116,7 @@ class AutoGeoOpt:
             # Bookkeeping
             iter_counter = 0
             if task_idx > 0:
-                req_coord_path = Path(auto.current_input_path).stem + ".xyz"
+                req_coord_path = Path(self.current_input_path).stem + ".xyz"
                 input_spec = {"xyz_path": req_coord_path}
                 next_input_path = path.join(self.folder_path, self.inputs[task])
                 modify_orca_input(next_input_path, **input_spec)
@@ -127,12 +153,12 @@ class AutoGeoOpt:
                           f"Total time taken is {np.sum(self.time_taken):.2f}s")
                     continue
                 else:
-                    req_coord_path = Path(auto.current_input_path).stem + ".xyz"
+                    req_coord_path = Path(self.current_input_path).stem + ".xyz"
                     input_spec = {"xyz_path": req_coord_path}
-                    modify_orca_input(auto.current_input_path, **input_spec)
+                    modify_orca_input(self.current_input_path, **input_spec)
 
                 for i in range(self.spec["job_max_try"][task_idx]):
-                    output_path, time_taken = auto.run_job(task)
+                    output_path, time_taken = self.run_job(task)
                     orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
                     iter_counter += 1
                     print(f"Run {iter_counter} took {time_taken:.2f} s")
@@ -157,10 +183,31 @@ class AutoGeoOpt:
         self.times_df = pd.DataFrame(self.time_taken, index=index, columns=["Time (s)"])
 
 
-if __name__ == "__main__":
-    req_folder = r"/home/wontleave/calc/autoopt/methylBr_F"
-    auto = AutoGeoOpt(req_folder)
-    auto.perform_tasks()
-    print(auto.times_df)
-    print(f"{auto.times_df.sum()}")
+class BatchJobs:
+    """
+    Perform a batch jobs by creating a list of AutoGeoOpt object
+    """
+    def __init__(self, root_folder, identical=False):
+        # Variables from arguments
+        self.root_folder = root_folder
+        self.identical = identical  # If all the batch jobs have the same sequence and input files
+        self.all_folder = []
 
+        read_root_folders(root_folder, self.all_folder)
+        self.auto_jobs = [AutoGeoOpt(folder) for folder in self.all_folder]
+
+    def run_batch_jobs(self):
+        for idx, job in enumerate(self.auto_jobs):
+            print(f"Job {idx + 1} -- {self.root_folder} ....")
+            if self.identical:
+                job.copy_req_files(self.root_folder)
+            job.read_spec()
+            job.perform_tasks()
+            pprint(job.times_df)
+            print(f"{job.times_df.sum()}")
+
+
+if __name__ == "__main__":
+    req_folder = r"/home/wontleave/calc/autoopt"
+    batch = BatchJobs(req_folder, identical=True)
+    batch.run_batch_jobs()
