@@ -152,7 +152,7 @@ class Orca5Processor:
                 raise ValueError(f"{line} is in a readable format: key = x y z")
             values = values.split()
 
-            if key.strip().lower() == "ts_atoms":
+            if key.strip().lower() == "ts_atoms":  # TODO this is no longer in use?
                 values = [int(item) for item in values]
             else:
                 values = [item.strip() for item in values]

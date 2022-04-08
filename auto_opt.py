@@ -8,6 +8,7 @@ from pathlib import Path
 from orca5_utils import Orca5
 from writing_utils import modify_orca_input
 from reading_utilis import read_root_folders
+from geo_optimization import analyze_ts
 from pprint import pprint
 
 
@@ -18,8 +19,10 @@ class AutoGeoOpt:
     """
     def __init__(self, folder_path):
         self.folder_path = folder_path
+        self.folder_name = Path(folder_path).stem
         self.spec = {}
         self.inputs = {}
+        self.outcomes: dict[str, bool] = {}  # A dict to indicate if the job is successful
 
         # Dynamics variables that change during the run
         self.current_input_path: str = None
@@ -49,10 +52,17 @@ class AutoGeoOpt:
             self.spec[key.strip()] = value.strip()
 
         for key in self.spec:
-            if key.lower() == "job_sequence":
-                self.spec[key] =  self.spec[key].split()
+            if key.lower() == "job_sequence" or key.lower() == "ts_int_coords":
+                self.spec[key] = self.spec[key].split()
             elif key.lower() == "job_max_try":
                 self.spec[key] = [int(item) for item in self.spec[key].split()]
+            # elif key.lower() == "ts_int_coords":
+            #     processed_coords = []
+            #     for coords in self.spec[key].split():
+            #         coords = coords.split("-")
+            #         processed_coords.append(tuple([int(atom) for atom in coords]))
+            #
+            #     self.spec[key] = processed_coords
 
         for job_type in self.spec["job_sequence"]:
             self.inputs[job_type] = self.spec[job_type]
@@ -115,6 +125,7 @@ class AutoGeoOpt:
             print(f"Performing {task} ...")
             # Bookkeeping
             iter_counter = 0
+            converged = False
             if task_idx > 0:
                 req_coord_path = Path(self.current_input_path).stem + ".xyz"
                 input_spec = {"xyz_path": req_coord_path}
@@ -134,29 +145,11 @@ class AutoGeoOpt:
 
                 if orca5.completed_job:  # A valid output file needs to have ORCA TERMINATED NORMALLY
                     print(f"{task} is done in {time_taken:.2f}")
+                    self.outcomes[task] = True
                 else:
                     print(f"{task} failed!")
+                    self.outcomes[task] = False
             else:
-                converged = False
-                output_path, time_taken = self.run_job(task)
-                orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
-
-                # Bookkeeping
-                iter_counter += 1
-                print(f"Run {iter_counter} took {time_taken:.2f} s")
-                self.job_type_labels.append(task)
-                self.iter_labels.append(iter_counter)
-                self.time_taken.append(time_taken)
-
-                if orca5.job_type_objs["OPT"].converged:
-                    print(f"---------- {task} is completed in {iter_counter} cycles(s). "
-                          f"Total time taken is {np.sum(self.time_taken):.2f}s")
-                    continue
-                else:
-                    req_coord_path = Path(self.current_input_path).stem + ".xyz"
-                    input_spec = {"xyz_path": req_coord_path}
-                    modify_orca_input(self.current_input_path, **input_spec)
-
                 for i in range(self.spec["job_max_try"][task_idx]):
                     output_path, time_taken = self.run_job(task)
                     orca5 = Orca5(output_path, 2e-5, allow_incomplete=True, get_opt_steps=True)
@@ -165,16 +158,35 @@ class AutoGeoOpt:
                     self.job_type_labels.append(task)
                     self.iter_labels.append(iter_counter)
                     self.time_taken.append(time_taken)
+
                     if orca5.job_type_objs["OPT"].converged:
                         print(f"---------- {task} is completed in {iter_counter} cycles(s). "
                               f"Total time taken is {np.sum(self.time_taken):.2f}s")
                         converged = True
+                        self.outcomes[task] = True
                         break
+
+                    if i == 0:
+                        req_coord_path = Path(self.current_input_path).stem + ".xyz"
+                        input_spec = {"xyz_path": req_coord_path}
+                        modify_orca_input(self.current_input_path, **input_spec)
+
+                    if task.upper() == "OPTTS":
+                        print("Performing OPTTS analysis")
+                        _, input_spec = analyze_ts(orca5, self.spec["ts_int_coords"])
+                        if input_spec is None:
+                            converged = False
+                            break
+                        else:
+                            n_recalc_hess = input_spec["recalc_hess"]
+                            print(f"Current recalc_hess is {n_recalc_hess}")
+                            modify_orca_input(self.current_input_path, **input_spec)
 
                 if not converged:
                     print(f"---------- {task} has failed after {iter_counter} cycles(s). "
                           f"Total time taken is {np.sum(self.time_taken):.2f}s")
                     print("We won't proceed to the next task!")
+                    self.outcomes[task] = False
                     break
 
         # Create the dataframe for time taken bookkeeping
@@ -198,7 +210,7 @@ class BatchJobs:
 
     def run_batch_jobs(self):
         for idx, job in enumerate(self.auto_jobs):
-            print(f"Job {idx + 1} -- {self.root_folder} ....")
+            print(f"****** Job {idx + 1} -- {job.folder_path} ....")
             if self.identical:
                 job.copy_req_files(self.root_folder)
             job.read_spec()
@@ -206,8 +218,23 @@ class BatchJobs:
             pprint(job.times_df)
             print(f"{job.times_df.sum()}")
 
+    def separate_failed(self):
+        """
+
+        :return:
+        """
+        for job in self.auto_jobs:
+            for key in job.outcomes:
+                if not job.outcomes[key]:
+                    destination = Path(self.root_folder).joinpath(key)
+                    if not destination.is_dir():
+                        destination.mkdir()
+                    full_path = Path(destination).joinpath(job.folder_name)
+                    shutil.move(job.folder_path, full_path.resolve())
+
 
 if __name__ == "__main__":
     req_folder = r"/home/wontleave/calc/autoopt"
     batch = BatchJobs(req_folder, identical=True)
     batch.run_batch_jobs()
+    batch.separate_failed()
