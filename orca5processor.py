@@ -4,6 +4,7 @@ import time
 import json
 import pickle
 import argparse
+import shutil
 import matplotlib.pyplot as plt
 from typing import Dict, List
 from orca5_utils import calc_rmsd_ase_atoms_non_pbs
@@ -12,7 +13,7 @@ from reading_utilis import read_root_folders
 from orca5_utils import Orca5
 from os import listdir, path
 from pathlib import Path
-from geo_optimization import Action
+from geo_optimization import Action, analyze_ts
 from copy import copy
 """
 Each valid Orca 5 output is converted into an Orca5 object
@@ -43,6 +44,7 @@ class Orca5Processor:
                     get_opt_steps = True
 
         self.root_folder_path = root_folder_path
+        self.root_folder = Path(root_folder_path)
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
         self.orca5_in_pd = []
         # Get all the folders within the root
@@ -367,7 +369,13 @@ class Orca5Processor:
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
     def process_optts(self, int_coords_from_spec):
+        """
+        TODO We assume that each folder will have only one OPTTS
+        :param int_coords_from_spec:
+        :return:
+        """
         optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
+        failed_ts_objs = []  # stored the key where there is a failed OPTTS obj
         coords_in_ts_master = {}
         ts_modes_master = {}
         req_int_coords = None
@@ -375,111 +383,31 @@ class Orca5Processor:
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
             temp_obj_lists_ = self.folders_to_orca5[key]
+            assert len(temp_obj_lists_) == 1, f"Sorry, we don't support the presence of " \
+                                              f"more than one TS job in a folder"
             for obj in temp_obj_lists_:
                 optts_objs[key] = []
                 if "TS" in obj.job_types:
                     optts_objs[key].append(obj)
-                    if "QMMM" in obj.job_types:
-                        trj_filename = obj.root_name + ".activeRegion_trj.xyz"
-                    else:
-                        trj_filename = obj.root_name + "_trj.xyz"
-                    trj_full_path = path.join(obj.root_path, trj_filename)
-                    obj.job_type_objs["OPT"].get_opt_trj(trj_full_path)
 
         # Analyse: if last step of opt has the required ts mode we will use this geometry
         for key in optts_objs:
             for obj in optts_objs[key]:
-                for idx, step in enumerate(obj.job_type_objs["OPT"].opt_steps):
-                    step.find_ts_mode()
-                    for i in step.coords_in_ts:
-                        value = step.red_int_coords[step.int_coord_to_idx[i]].distance_old
-                        ts_mode = step.condensed_data[i]
-                        if i not in coords_in_ts_master:
-                            coords_in_ts_master[i] = []
-                            ts_modes_master[i] = []
-                        else:
-                            coords_in_ts_master[i].append(value)
-                            ts_modes_master[i].append(ts_mode)
-
-                obj.job_type_objs["OPT"].steps_to_pd(int_coords_from_spec)
-                if req_int_coords is None:
-                    req_int_coords = obj.job_type_objs["OPT"].req_int_coords_idx
-                ts_mode_only_df = obj.job_type_objs["OPT"].req_data_pd.xs("TS mode", level=1, axis=1)
-                all_req_int_coords_ts_mode_at_step = ts_mode_only_df.all(axis=1)
-                any_req_int_coords_ts_mode_at_step = ts_mode_only_df.any(axis=1)
-                action = Action()
-
-                need_partial = True
-                for i in reversed(all_req_int_coords_ts_mode_at_step.index.values):
-                    if all_req_int_coords_ts_mode_at_step[i]:
-                        action.geo_to_use = i
-                        need_partial = False
-                        break
-
-                if need_partial:
-                    for i in reversed(any_req_int_coords_ts_mode_at_step.index.values):
-                        if any_req_int_coords_ts_mode_at_step[i]:
-                            action.geo_to_use = i
-                            action.partial_req_ts_mode = True
-                            break
-
-                if action.geo_to_use < 0:
-                    action.exclude = True
-
-                obj.job_type_objs["OPT"].action = copy(action)
-
-        for key in coords_in_ts_master:
-            show = False
-            if key in req_int_coords:
-                show = True
-            if show:
-                freq, bin = np.histogram(coords_in_ts_master[key], bins="auto")
-                max_freq_idx = np.argmax(freq)
-                left = bin[max_freq_idx]
-                right = bin[max_freq_idx+1]
-                mid_pt = (left + right)/2
-                print(f"{key} -- {freq[max_freq_idx]} -- between {left:.4f} and {right:.4f} -- midpoint = {mid_pt:.4f}")
-
-        # FAILED objects: those with no ts mode in the required coordinates at any point of the optTS search
-        for key in optts_objs:
-            for obj in optts_objs[key]:
-                req_obj = obj.job_type_objs["OPT"].action
-                values = obj.job_type_objs["OPT"].req_data_pd.xs("value", level=1, axis=1)
-                obj.job_type_objs["OPT"].values_diff = values.diff() / values * 100.0
-                if req_obj.exclude:
-                    print(f"FAILED -- {key}", end=" --- ")
-                    for int_coords in values:
-                        print(f"{int_coords} = {values[int_coords].min()} and {values[int_coords].max()}", end="  ")
-                    print()
-                    action.delete_pbs(key)
-                elif req_obj.partial_req_ts_mode:
-                    print(f"USE PARTIAL {req_obj.geo_to_use} -- {key}")
-                    input_path = obj.root_name + ".inp"
-                    full_input_path = path.join(obj.root_path, input_path)
-                    xyz_name = obj.root_name + ".xyz"
-                    xyz_full_path = path.join(obj.root_path, xyz_name)
-                    obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use - 1].write(xyz_full_path)
-                    modify_orca_input(full_input_path,  **{"recalc_hess": 5, "xyz_path": xyz_name})
+                full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec)
+                if full_input_path is None:
+                    failed_ts_objs.append(key)
                 else:
-                    print(f"USE ALL  {req_obj.geo_to_use} -- {key}")
-                    if req_obj.geo_to_use == len(obj.job_type_objs["OPT"].opt_steps):
-                        xyz_name = obj.root_name + ".xyz"
-                        xyz_full_path = path.join(obj.root_path, xyz_name)
-                        obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use - 1].write(xyz_full_path)
+                    modify_orca_input(full_input_path, **input_spec)
 
-                        # Determine by how many steps recalc_hess will be increased from the current
-                        if (obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.2).all():
-                            recalc_hess = 10
-                        elif (obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.1).all():
-                            recalc_hess = 20
-                        elif (obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.05).all():
-                            recalc_hess = 100
-                        else:
-                            recalc_hess = 5
-                        input_path = obj.root_name + ".inp"
-                        full_input_path = path.join(obj.root_path, input_path)
-                        modify_orca_input(full_input_path, **{"recalc_hess": recalc_hess, "xyz_path": xyz_name})
         # remove the *.pbs file
+        print()
+        for idx, key in enumerate(failed_ts_objs):
+            if idx == 0:
+                failed_root = Path(self.root_folder.joinpath("FAILED"))
+            stem_of_ts_objs = Path(key).stem
+            destination = failed_root.joinpath(stem_of_ts_objs)
+            print(f"{idx + 1} ... Moving failed job {key} to {destination.resolve()}")
+            shutil.move(key, destination.resolve())
 
     def merge_thermo(self, print_thermo_obj, ref_obj):
         """
