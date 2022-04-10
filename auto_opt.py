@@ -117,7 +117,6 @@ class AutoGeoOpt:
     def perform_tasks(self):
         """
         TODO add detail of each task: OPT - convergence criteria, OPTTS - OPT + required int coords
-        TODO determine if there is a need to include a prefix for the xyzfile (i.e. in singularity container)
         Perform the task(s) as given by the job_sequence key in spec.txt
         :return:
         """

@@ -22,11 +22,11 @@ Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN
 
 
 # TODO Slow reading in some cases!
-# TODO
 
 class Orca5Processor:
     """
     Read a folder which contains a collection of ORCA5 jobs to create a list of ORCA5 object
+    TODO singularity_scratch will only affect process_optts post-procesing for now
     """
 
     def __init__(self, root_folder_path,
@@ -34,8 +34,21 @@ class Orca5Processor:
                  display_warning=False,
                  delete_incomplete_job=False,
                  warning_txt_file=None,
-                 error_handling=None
+                 error_handling=None,
+                 singularity_scratch=None
                  ):
+        """
+
+        :param root_folder_path:
+        :param post_process_type:
+        :param display_warning:
+        :param delete_incomplete_job:
+        :param warning_txt_file:
+        :param error_handling:
+        :param singularity_scratch: if this is not None, then ORCA5 is ran from a singularity container and
+                                    this variable will be preprended to all filename in the orca input
+        :type singularity_scratch: str
+        """
 
         get_opt_steps = False
         for key in post_process_type:
@@ -47,6 +60,7 @@ class Orca5Processor:
         self.root_folder = Path(root_folder_path)
         self.folders_to_orca5 = {}  # Map each folder path to an Orca5 object or None if it is not possible
         self.orca5_in_pd = []
+        self.singularity_scratch = singularity_scratch
         # Get all the folders within the root
         all_folders = []
         read_root_folders(root_folder_path, all_folders)
@@ -376,9 +390,6 @@ class Orca5Processor:
         """
         optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
         failed_ts_objs = []  # stored the key where there is a failed OPTTS obj
-        coords_in_ts_master = {}
-        ts_modes_master = {}
-        req_int_coords = None
 
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
@@ -394,12 +405,15 @@ class Orca5Processor:
         for key in optts_objs:
             for obj in optts_objs[key]:
                 full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec)
+
                 if full_input_path is None:
                     failed_ts_objs.append(key)
                 else:
+                    if self.singularity_scratch is not None:
+                        input_spec["xyz_path"] = "/" + self.singularity_scratch + "/" + \
+                                                 input_spec["xyz_path"]  # linux only
                     modify_orca_input(full_input_path, **input_spec)
 
-        # remove the *.pbs file
         print()
         for idx, key in enumerate(failed_ts_objs):
             if idx == 0:
@@ -463,6 +477,10 @@ if __name__ == "__main__":
         ppinp_path = args.ppinp
 
     spec = Orca5Processor.parse_pp_inp(ppinp_path)
+    if "singularity_scratch" in spec:
+        singularity_scratch = spec["singularity_scratch"][0]
+    else:
+        singularity_scratch = None
 
     if args.pptype == "stationary":
         warning_path = None
@@ -481,11 +499,14 @@ if __name__ == "__main__":
                                     display_warning=True,
                                     post_process_type={"stationary": spec},
                                     delete_incomplete_job=True,
-                                    warning_txt_file=warning_path)
+                                    warning_txt_file=warning_path,
+                                    singularity_scratch=singularity_scratch)
     elif args.pptype == "single point":
         orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
                                                               {"to_pinn": ["pickle", "energy"],
                                                                "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
 
     elif args.pptype == "optts analysis":
-        orca5_objs = Orca5Processor(args.root, post_process_type={"optts analysis": spec})
+        orca5_objs = Orca5Processor(args.root,
+                                    post_process_type={"optts analysis": spec},
+                                    singularity_scratch=singularity_scratch)
