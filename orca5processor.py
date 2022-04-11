@@ -390,6 +390,7 @@ class Orca5Processor:
         """
         optts_objs: Dict[str, List[Orca5]] = {}  # The key is the root folder, the value is the OPT job_type_obj
         failed_ts_objs = []  # stored the key where there is a failed OPTTS obj
+        converged_ts_objs = []
 
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
@@ -404,16 +405,27 @@ class Orca5Processor:
         # Analyse: if last step of opt has the required ts mode we will use this geometry
         for key in optts_objs:
             for obj in optts_objs[key]:
-                full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec)
-
-                if full_input_path is None:
-                    failed_ts_objs.append(key)
+                if obj.job_type_objs["OPT"].converged:
+                    converged_ts_objs.append(key)
                 else:
-                    if self.singularity_scratch is not None:
-                        input_spec["xyz_path"] = "/" + self.singularity_scratch + "/" + \
-                                                 input_spec["xyz_path"]  # linux only
-                    modify_orca_input(full_input_path, **input_spec)
+                    full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec)
 
+                    if full_input_path is None:
+                        failed_ts_objs.append(key)
+                    else:
+                        if self.singularity_scratch is not None:
+                            input_spec["xyz_path"] = "/" + self.singularity_scratch + "/" + \
+                                                     input_spec["xyz_path"]  # linux only
+                        modify_orca_input(full_input_path, **input_spec)
+
+        print()
+        for idx, key in enumerate(converged_ts_objs):
+            if idx == 0:
+                converged_root = Path(self.root_folder.joinpath("CONVERGED"))
+            stem_of_ts_objs = Path(key).stem
+            destination = converged_root.joinpath(stem_of_ts_objs)
+            print(f"{idx + 1} ... Moving converged job {key} to {destination.resolve()}")
+            shutil.move(key, destination.resolve())
         print()
         for idx, key in enumerate(failed_ts_objs):
             if idx == 0:
@@ -485,8 +497,9 @@ if __name__ == "__main__":
     if args.pptype == "stationary":
         warning_path = None
         # We will not get individual optimization step for a stationary post-processing
-        if spec["get_opt_step"].lower() == "yes":
-            spec["get_opt_step"] = "no"
+        if "get_opt_step" in spec:
+            if spec["get_opt_step"].lower() == "yes":
+                spec["get_opt_step"] = "no"
 
         if "warning" in spec:
             # spec["warning"] is a list of str
