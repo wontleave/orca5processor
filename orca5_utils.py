@@ -1,4 +1,3 @@
-import pathlib
 import re
 from rmsd import reorder_inertia_hungarian, rmsd
 from os import path
@@ -134,6 +133,7 @@ class Orca5:
             if job_type == "SP":
                 self.job_type_objs["SP"].get_final_sp_energy(lines_)
             elif job_type == "OPT":
+                self.job_type_objs["OPT"].get_keywords(self.keywords["geom"].keywords)
                 if get_opt_steps:
                     self.job_type_objs["OPT"].get_opt_steps(lines_)
                 else:
@@ -656,18 +656,19 @@ class Geom:
         self.keywords = {"maxiter": None,
                          "gdiismaxeq": None,
                          "numhess": None,
+                         "calc_hess": None,
                          "recalc_hess": None,
                          "trust": None,
                          "numhess_centraldiff": None,
                          "scan": [],
-                         "modify_internals": [],
+                         "modify_internal": [],
                          "constraints": []}
 
-        self.single_value_str = ("numhess", "correlation", "numhess_centraldiff")
+        self.single_value_str = ("calc_hess, numhess", "correlation", "numhess_centraldiff")
         self.single_value_float = ("trust")
         self.single_value_int = ("maxiter", "gdiismaxeq", "recalc_hess")
         # Multi_values keywords required an "end" to terminate
-        self.multi_values = ("scan", "modify_internals", "constraints")
+        self.multi_values = ("scan", "modify_internal", "constraints")
 
         # ASE Atoms object of the optimized geometry. Both has to be equal
         self.geo_from_output = None
@@ -684,6 +685,23 @@ class Geom:
         self.values_diff = None  # The difference between the i and i+1 step in the optimization divide by the distance
         self.action = None  # An Action object to indicate what to do with this job
         self.opt_trj: List[Atoms] = None
+
+    def get_keywords(self, keywords):
+        """
+        Sort the keywords from the output file and assign them to the appropriate keywords in GEOM
+
+        :param keywords: a dictionary of ORCA5 keywords from the output file
+        :type  keywords: dict[str, str]
+        :return:
+        """
+        for key in keywords:
+            if key in self.keywords:
+                if key in self.single_value_int:
+                    if keywords[key] is not None:
+                        self.keywords[key] = int(keywords[key])
+                else:
+                    # TODO multi values keywords are not supported
+                    self.keywords[key] = keywords[key]
 
     def get_opt_geo(self, lines_):
         """
@@ -888,13 +906,17 @@ class Geom:
 
         self.req_data_pd = pd.DataFrame(ordered_data, index=row_idx, columns=index)
 
-    def get_opt_trj(self, trj_full_path):
+    def get_opt_trj(self, trj_full_path, final_xyzfile_path):
         """
 
         :param trj_full_path:
-        :return: Atoms
+        :param final_xyzfile_path:
+        :return: list[Atoms]
         """
-        self.opt_trj = read(trj_full_path, index=':')
+        initial_to_second_last = read(trj_full_path, index=':')
+        last = read(final_xyzfile_path)
+        # include the last geometry
+        self.opt_trj = initial_to_second_last + [last]
 
 
 class Mtr:
@@ -1472,3 +1494,8 @@ def get_orca5_keywords(lines_):
     return keywords, {"coord_type": coord_type, "coord_path": path.basename(coord_path),
                       "multiplicity": multiplicity, "charge": charge}, path.basename(name)
 
+
+if __name__ == "__main__":
+    path_ = r"/home/wontleave/calc/autoopt/new_test/methylI_F/run.optTS.r2scan-3c.coronab"
+    orca5 = Orca5(path_, 1e-5, allow_incomplete=True, get_opt_steps=True)
+    print()

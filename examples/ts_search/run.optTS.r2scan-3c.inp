@@ -1,0 +1,14 @@
+!optTS verytightscf verytightopt r2scan-3c
+%MaxCore 1000
+%pal nprocs 8 end
+%geom
+	MaxIter 9
+	GDIISMaxEq 17
+	Calc_Hess true
+	Recalc_Hess 5
+	Trust 0.15
+	modify_internal  {B 0 1 A} {B 0 5 A}  end
+end
+%Freq
+end
+* xyzfile -1 1 run.copt.r2scan-3c.xyz

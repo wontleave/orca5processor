@@ -1,0 +1,172 @@
+-------------------------------------------------------------
+----------------------- !PROPERTIES! ------------------------
+-------------------------------------------------------------
+# -----------------------------------------------------------
+$ PAL_Flags
+   description: The PAL Flags
+   geom. index: 1
+   prop. index: 1
+        Diskflag:     2
+# -----------------------------------------------------------
+$ SCF_Energy
+   description: The SCF energy
+   geom. index: 1
+   prop. index: 1
+        SCF Energy:    -2713.9026437144
+# -----------------------------------------------------------
+$ DFT_Energy
+   description: The DFT energy
+   geom. index: 1
+   prop. index: 1
+   Number of Alpha Electrons                 26.9999935118 
+   Number of Beta  Electrons                 26.9999935118 
+   Total number of  Electrons                53.9999870237 
+   Exchange energy                         -106.1345792806 
+   Correlation energy                        -2.3246227377 
+   Correlation energy NL                      0.0000000000 
+   Exchange-Correlation energy             -108.4592020183 
+   Embedding correction                       0.0000000000 
+   Total DFT Energy (No VdW correction)   -2713.9026437144 
+# -----------------------------------------------------------
+$ Mayer_Pop
+   description: The Mayer population analysis
+   geom. index: 1
+   prop. index: 1
+     Number of atoms                     : 6
+     Threshold for printing              : 0.1000000
+     Number of bond orders printed       : 5
+  NA   - Mulliken gross atomic population
+  ZA   - Total nuclear charge
+  QA   - Mulliken gross atomic charge
+  VA   - Mayer's total valence
+  BVA  - Mayer's bonded valence
+  FA   - Mayer's free valence
+  ATOM       NA         ZA         QA         VA         BVA        FA
+  0   0     6.3382     6.0000    -0.3382     3.7362     3.7362    -0.0000
+  1   0    35.4095    35.0000    -0.4095     0.8236     0.8236    -0.0000
+  2   0     0.8582     1.0000     0.1418     0.9600     0.9600    -0.0000
+  3   0     0.8582     1.0000     0.1418     0.9600     0.9600     0.0000
+  4   0     0.7303     1.0000     0.2697     0.9480     0.9480    -0.0000
+  5   0     9.8057     9.0000    -0.8057     0.3023     0.3023    -0.0000
+      Bond orders larger than 0.1000000
+           Atom A     A.N. of A          Atom B    A.N. of B              Bond order
+                0             6               1           35                0.754603
+                0             6               2            1                0.967048
+                0             6               3            1                0.967043
+                0             6               4            1                0.872606
+                0             6               5            9                0.174924
+# -----------------------------------------------------------
+$ VdW_Correction
+   description: The Van der Waals Correction
+   geom. index: 1
+   prop. index: 1
+        Van der Waals Correction:       -0.0008524585
+# -----------------------------------------------------------
+$ PAL_Flags
+   description: The PAL Flags
+   geom. index: 2
+   prop. index: 1
+        Diskflag:     2
+# -----------------------------------------------------------
+$ SCF_Energy
+   description: The SCF energy
+   geom. index: 2
+   prop. index: 1
+        SCF Energy:    -2713.9026437132
+# -----------------------------------------------------------
+$ DFT_Energy
+   description: The DFT energy
+   geom. index: 2
+   prop. index: 1
+   Number of Alpha Electrons                 26.9999935118 
+   Number of Beta  Electrons                 26.9999935118 
+   Total number of  Electrons                53.9999870237 
+   Exchange energy                         -106.1345788331 
+   Correlation energy                        -2.3246227250 
+   Correlation energy NL                      0.0000000000 
+   Exchange-Correlation energy             -108.4592015582 
+   Embedding correction                       0.0000000000 
+   Total DFT Energy (No VdW correction)   -2713.9026437132 
+# -----------------------------------------------------------
+$ Mayer_Pop
+   description: The Mayer population analysis
+   geom. index: 2
+   prop. index: 1
+     Number of atoms                     : 6
+     Threshold for printing              : 0.1000000
+     Number of bond orders printed       : 5
+  NA   - Mulliken gross atomic population
+  ZA   - Total nuclear charge
+  QA   - Mulliken gross atomic charge
+  VA   - Mayer's total valence
+  BVA  - Mayer's bonded valence
+  FA   - Mayer's free valence
+  ATOM       NA         ZA         QA         VA         BVA        FA
+  0   0     6.3382     6.0000    -0.3382     3.7362     3.7362    -0.0000
+  1   0    35.4095    35.0000    -0.4095     0.8236     0.8236     0.0000
+  2   0     0.8582     1.0000     0.1418     0.9600     0.9600     0.0000
+  3   0     0.8582     1.0000     0.1418     0.9600     0.9600     0.0000
+  4   0     0.7303     1.0000     0.2697     0.9480     0.9480     0.0000
+  5   0     9.8057     9.0000    -0.8057     0.3023     0.3023     0.0000
+      Bond orders larger than 0.1000000
+           Atom A     A.N. of A          Atom B    A.N. of B              Bond order
+                0             6               1           35                0.754603
+                0             6               2            1                0.967048
+                0             6               3            1                0.967043
+                0             6               4            1                0.872606
+                0             6               5            9                0.174924
+# -----------------------------------------------------------
+$ VdW_Correction
+   description: The Van der Waals Correction
+   geom. index: 2
+   prop. index: 1
+        Van der Waals Correction:       -0.0008524585
+# -----------------------------------------------------------
+$ SCF_Electric_Properties
+   description: The SCF Calculated Electric Properties
+   geom. index: 2
+   prop. index: 1
+       Filename                          : /home/wontleave/calc/autoopt/methylBr_F/run.copt.r2scan-3c.scfp 
+       Do Dipole Moment Calculation      : true 
+       Do Quadrupole Moment Calculation  : false 
+       Do Polarizability Calculation     : false 
+** Dipole moment part of electric properties **
+        Magnitude of dipole moment (Debye) :        9.5531333222
+        Electronic Contribution:
+                  0    
+      0      13.701514
+      1       1.221055
+      2       0.249076
+        Nuclear Contribution:
+                  0    
+      0      -9.993050
+      1      -1.772639
+      2      -0.511260
+        Total Dipole moment:
+                  0    
+      0       3.708464
+      1      -0.551584
+      2      -0.262184
+# -------------------------------------------------------------
+----------------------- !GEOMETRIES! ------------------------
+# -------------------------------------------------------------
+------------------------ !GEOMETRY! -------------------------
+    Number of atoms:    6 
+    Geometry Index:     1 
+    Coordinates:
+               0 C     -1.840570604282   -0.579773226764   -0.041783533418
+               1 Br     0.195050999345   -0.163048991446    0.083172544210
+               2 H     -1.957650936862   -1.450571802237    0.597303933165
+               3 H     -1.983286067551   -0.819727141997   -1.091783947414
+               4 H     -2.493466170170    0.249569100070    0.277863422468
+               5 F     -4.238677220479    0.128422062374    0.259137580989
+------------------------ !GEOMETRY! -------------------------
+    Number of atoms:    6 
+    Geometry Index:     2 
+    Coordinates:
+               0 C     -1.840570640871   -0.579773195516   -0.041783506805
+               1 Br     0.195051321373   -0.163049015392    0.083172511040
+               2 H     -1.957651041094   -1.450571776941    0.597303944183
+               3 H     -1.983286192650   -0.819727094969   -1.091783908623
+               4 H     -2.493466128043    0.249569150387    0.277863456567
+               5 F     -4.238677318715    0.128421932431    0.259137503639

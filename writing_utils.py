@@ -195,6 +195,9 @@ def modify_orca_input(input_path, **kwargs):
     if "recalc_hess" in kwargs:
         new_max_iter = kwargs["recalc_hess"] * 2 - 1
         change_max_iter = True
+    elif "maxiter" in kwargs:
+        change_max_iter = True
+        new_max_iter = kwargs["maxiter"]
 
     new_input = ""
 

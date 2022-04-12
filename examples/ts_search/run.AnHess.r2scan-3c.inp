@@ -1,0 +1,9 @@
+!verytightscf r2scan-3c
+!AnFreq
+%MaxCore 1000
+%pal nprocs 8
+end
+%Freq
+	Temp 298.15
+end
+* xyzfile -1 1 run.optTS.r2scan-3c.xyz

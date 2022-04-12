@@ -332,7 +332,7 @@ class Orca5Processor:
             assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
             # Merge the printthermo job to ref_obj
             if len(print_thermo_objs[key]) > 0:
-               self.merge_thermo(print_thermo_objs[key], ref_objs[key][0])
+                Orca5Processor.merge_thermo(print_thermo_objs[key], ref_objs[key][0])
 
         for key in self.folders_to_orca5:
             self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
@@ -435,7 +435,8 @@ class Orca5Processor:
             print(f"{idx + 1} ... Moving failed job {key} to {destination.resolve()}")
             shutil.move(key, destination.resolve())
 
-    def merge_thermo(self, print_thermo_obj, ref_obj):
+    @staticmethod
+    def merge_thermo(print_thermo_obj, ref_obj):
         """
         Populate the self.freqs Dict in ref_obj
 

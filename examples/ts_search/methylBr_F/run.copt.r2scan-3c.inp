@@ -1,0 +1,11 @@
+!opt verytightscf verytightopt r2scan-3c
+%MaxCore 1000
+%pal nprocs 8 end
+%geom
+	MaxIter 20
+	Trust 0.3
+	Constraints {B 0 5 C}  end
+end
+%Freq
+end
+* xyzfile -1 1 start.xyz

@@ -121,18 +121,21 @@ class Action:
             remove(file)
 
 
-def analyze_ts(orca5_obj, int_coords_from_spec):
+def analyze_ts(orca5_obj, int_coords_from_spec, recalc_hess_min):
     """
 
     :param orca5_obj:
     :type orca5_obj: Orca5
     :param int_coords_from_spec: the spec.txt file will provide the required internal coordinates for the TS
     :type int_coords_from_spec:
+    :param recalc_hess_min: specify what is the minimum value for recalc_hess. If =0 then there is no recalc_hess
+    :type recalc_hess_min: str
     :return:
     """
     coords_in_ts_master = {}
     ts_modes_master = {}
     req_int_coords = None
+    recalc_hess_min = int(recalc_hess_min)
 
     for idx, step in enumerate(orca5_obj.job_type_objs["OPT"].opt_steps):
         step.find_ts_mode()
@@ -197,12 +200,19 @@ def analyze_ts(orca5_obj, int_coords_from_spec):
         return None, None
     else:
         # Set up the trajectory file
+        # The trajectory file contains the initial geometry (idx=0) and the n-1 geometry.
+        # The geometry of the final step is the xyzfile with the same stem as the input file
         if "QMMM" in orca5_obj.job_types:
             trj_filename = orca5_obj.root_name + ".activeRegion_trj.xyz"
         else:
             trj_filename = orca5_obj.root_name + "_trj.xyz"
-        trj_full_path = path.join(orca5_obj.root_path, trj_filename)
-        orca5_obj.job_type_objs["OPT"].get_opt_trj(trj_full_path)
+
+        if orca5_obj.coord_spec["coord_type"] == "xyzfile":
+            xyzfile_path = path.join(orca5_obj.root_path, orca5_obj.coord_spec["coord_path"])
+            trj_full_path = path.join(orca5_obj.root_path, trj_filename)
+            orca5_obj.job_type_objs["OPT"].get_opt_trj(trj_full_path, xyzfile_path)
+        else:
+            raise Exception(f"Only coordinates specification via xyzfile is supported now!")
 
         print(orca5_obj.job_type_objs["OPT"].req_data_pd)
         # TODO get recalc_hess of previous iteration
@@ -213,26 +223,47 @@ def analyze_ts(orca5_obj, int_coords_from_spec):
             full_input_path = path.join(orca5_obj.root_path, input_path)
             xyz_name = orca5_obj.root_name + ".xyz"
             xyz_full_path = path.join(orca5_obj.root_path, xyz_name)
-            orca5_obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use - 1].write(xyz_full_path)
-            return full_input_path, {"recalc_hess": 5, "xyz_path": xyz_name}
+            orca5_obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use].write(xyz_full_path)
+
+            if recalc_hess_min > 0:
+                return full_input_path, {"recalc_hess": recalc_hess_min, "xyz_path": xyz_name}
+            else:
+                return full_input_path, {"maxiter": req_obj.geo_to_use, "xyz_path": xyz_name}
+
         else:
             print(f"All internal coordinates have TS mode -- Geometry {req_obj.geo_to_use} will be used")
 
             xyz_name = orca5_obj.root_name + ".xyz"
             xyz_full_path = path.join(orca5_obj.root_path, xyz_name)
-            orca5_obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use - 1].write(xyz_full_path)
-
-            # Determine by how many steps recalc_hess will be increased from the current
-            recalc_hess = req_obj.geo_to_use
-
-            if (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.1).all():
-                recalc_hess += 10
-            elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.05).all():
-                recalc_hess += 20
-            elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.01).all():
-                recalc_hess += 100
-
+            orca5_obj.job_type_objs["OPT"].opt_trj[req_obj.geo_to_use].write(xyz_full_path)
             input_path = orca5_obj.root_name + ".inp"
             full_input_path = path.join(orca5_obj.root_path, input_path)
-            return full_input_path, {"recalc_hess": recalc_hess, "xyz_path": xyz_name}
+            # Determine by how many steps recalc_hess will be increased from the current
+
+            if recalc_hess_min > 0:
+                prev_recalc_hess = orca5_obj.job_type_objs["OPT"].keywords["recalc_hess"]
+                recalc_hess = req_obj.geo_to_use
+                if recalc_hess < prev_recalc_hess:
+                    recalc_hess = recalc_hess_min
+                elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.1).all():
+                    recalc_hess += 10
+                elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.05).all():
+                    recalc_hess += 20
+                elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.01).all():
+                    recalc_hess += 100
+
+                return full_input_path, {"recalc_hess": recalc_hess, "xyz_path": xyz_name}
+
+            else:
+                curr_max_iter = req_obj.geo_to_use
+
+                if  (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.1).all():
+                    curr_max_iter += 10
+                elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.05).all():
+                    curr_max_iter += 20
+                elif (orca5_obj.job_type_objs["OPT"].values_diff.iloc[req_obj.geo_to_use - 1] < 0.01).all():
+                    curr_max_iter += 100
+
+                return full_input_path, {"maxiter": curr_max_iter, "xyz_path": xyz_name}
+
 

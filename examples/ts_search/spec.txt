@@ -1,0 +1,7 @@
+job_sequence = COPT OPTTS ANHESS
+job_max_try = 1 1 1
+COPT = run.copt.r2scan-3c.inp
+OPTTS = run.optTS.r2scan-3c.inp
+ANHESS = run.AnHess.r2scan-3c.inp
+run_command = /home/wontleave/apps/ORCA5/orca
+ts_int_coords = 1-0 5-0

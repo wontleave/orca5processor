@@ -37,10 +37,14 @@ class AutoGeoOpt:
     def read_spec(self):
         """
         Provides the command to execute ORCA5,
+
         a list of job sequence:
             [COPT OPTS ANHESS] -> This will provide a constrained optimization, then pass the contrained coordinates
                                     to OPTTS as additional internal coordinates, a AnHess will be run at the end
             [COTP, AnHess-OPTTS AnHess] -> The AnHess for OPTTS is ran as a separate job
+
+        COPT, OPT, OPTTS, NUMHESS or ANHESS = the orca input filename
+
         :return:
         """
         full_path = path.join(self.folder_path, "spec.txt")
@@ -172,13 +176,18 @@ class AutoGeoOpt:
 
                     if task.upper() == "OPTTS":
                         print("Performing OPTTS analysis")
-                        _, input_spec = analyze_ts(orca5, self.spec["ts_int_coords"])
+                        _, input_spec = analyze_ts(orca5, self.spec["ts_int_coords"], self.spec["recalc_hess_min"])
                         if input_spec is None:
                             converged = False
                             break
                         else:
-                            n_recalc_hess = input_spec["recalc_hess"]
-                            print(f"Current recalc_hess is {n_recalc_hess}")
+                            if "recalc_hess" in input_spec:
+                                current_recalc_hess = input_spec["recalc_hess"]
+                                print(f"Current recalc_hess is {current_recalc_hess}")
+                            elif "maxiter" in input_spec:
+                                current_max_iter = input_spec["maxiter"]
+                                print(f"Current max iteration is {current_max_iter}")
+
                             modify_orca_input(self.current_input_path, **input_spec)
 
                 if not converged:
@@ -233,7 +242,7 @@ class BatchJobs:
 
 
 if __name__ == "__main__":
-    req_folder = r"/home/wontleave/calc/autoopt"
+    req_folder = r"/home/wontleave/calc/autoopt/new_test"
     batch = BatchJobs(req_folder, identical=True)
     batch.run_batch_jobs()
     batch.separate_failed()
