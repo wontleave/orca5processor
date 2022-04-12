@@ -240,9 +240,18 @@ class BatchJobs:
                     full_path = Path(destination).joinpath(job.folder_name)
                     shutil.move(job.folder_path, full_path.resolve())
 
+class RemoteBatchJobs(BatchJobs):
+    """
+    Uses paramiko to connect to an HPC cluster and manage the sending and processing of jobs
+    """
+    def __init__(self):
+
+        # Control connection
 
 if __name__ == "__main__":
-    req_folder = r"/home/wontleave/calc/autoopt/new_test"
-    batch = BatchJobs(req_folder, identical=True)
-    batch.run_batch_jobs()
-    batch.separate_failed()
+    # req_folder = r"/home/wontleave/calc/autoopt/new_test"
+    # batch = BatchJobs(req_folder, identical=True)
+    # batch.run_batch_jobs()
+    # batch.separate_failed()
+
+    # Remote Batch jobs test
