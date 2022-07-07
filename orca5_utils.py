@@ -146,7 +146,7 @@ class Orca5:
                     self.job_type_objs["FREQ"].get_thermochemistry(lines_)
                     self.freqs[self.job_type_objs["FREQ"].temp] = self.job_type_objs["FREQ"]
 
-                if "OPT" not in self.job_types and "OPTTS" not in self.job_types:
+                if "OPT" not in self.job_types and "TS" not in self.job_types:
 
                     # Read the engrad to determine if we have a minimum.
                     # 2 possibilities: to obtain the engrad. From the xyz filename or from the freq job filename.
@@ -215,7 +215,6 @@ class Orca5:
         :rtype:
         """
         qmmm_lvl_of_theory = None
-
 
         if "OPT" in self.keywords["simple"]:
             self.job_types.append("OPT")
@@ -419,12 +418,12 @@ class Orca5:
             if "QMMM" in self.job_types:
                 if self.keywords["qmmm"].lvl_of_theory != "":
                     high_level, low_level = self.keywords["qmmm"].lvl_of_theory.split("/")
-                    level_of_theory += f":{low_level}"
+                    level_of_theory += f":{low_level.upper()}"
 
             if "CPCM" in self.job_types:
                 if self.keywords["cpcm"].keywords["smd"].lower() == "true":
                     solvent = self.keywords["cpcm"].keywords["smdsolvent"]
-                    level_of_theory = f"SMD({(solvent)})/" + level_of_theory
+                    level_of_theory = f"SMD({(solvent.upper())})/" + level_of_theory
                 else:
                     solvent = self.keywords["cpcm"].solvent
                     if self.keywords["cpcm"].name == "ALPB":

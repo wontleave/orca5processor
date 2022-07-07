@@ -378,6 +378,16 @@ class Orca5Processor:
             if counter == 0:
                 row_labels = list(labeled_data[key_from_base].keys())
                 counter += 1
+            # else:
+            ## For DEBUG only
+            #     temp_labels = list(labeled_data[key_from_base].keys())
+            #     for idx, label in enumerate(temp_labels):
+            #         if row_labels[idx] == label:
+            #             same_label = True
+            #         else:
+            #             same_label = False
+            #         print(f"{idx=} {row_labels[idx]} vs. {label} -- {same_label}")
+
         combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
         suffix = path.basename(self.root_folder_path)
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
@@ -395,20 +405,20 @@ class Orca5Processor:
         # Find all the ORCA 5 output that belongs to a optTS job
         for key in self.folders_to_orca5:
             temp_obj_lists_ = self.folders_to_orca5[key]
-            assert len(temp_obj_lists_) == 1, f"Sorry, we don't support the presence of " \
-                                              f"more than one TS job in a folder"
+            optts_objs[key] = []
             for obj in temp_obj_lists_:
-                optts_objs[key] = []
                 if "TS" in obj.job_types:
                     optts_objs[key].append(obj)
 
+            assert len(optts_objs[key]) == 1, f"Sorry, we don't support the presence of " \
+                                              f"more than one TS job or no TS job in a folder"
         # Analyse: if last step of opt has the required ts mode we will use this geometry
         for key in optts_objs:
             for obj in optts_objs[key]:
                 if obj.job_type_objs["OPT"].converged:
                     converged_ts_objs.append(key)
                 else:
-                    full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec)
+                    full_input_path, input_spec = analyze_ts(obj, int_coords_from_spec, recalc_hess_min=0)
 
                     if full_input_path is None:
                         failed_ts_objs.append(key)
@@ -500,6 +510,8 @@ if __name__ == "__main__":
         # We will not get individual optimization step for a stationary post-processing
         if "get_opt_step" in spec:
             if spec["get_opt_step"].lower() == "yes":
+                spec["get_opt_step"] = "yes"
+            else:
                 spec["get_opt_step"] = "no"
 
         if "warning" in spec:
@@ -516,10 +528,15 @@ if __name__ == "__main__":
                                     warning_txt_file=warning_path,
                                     singularity_scratch=singularity_scratch)
     elif args.pptype == "single point":
-        orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
-                                                              {"to_pinn": ["pickle", "energy"],
-                                                               "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
+        # orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
+        #                                                       {"to_pinn": ["pickle", "energy"],
+        #                                                        "level_of_theory": 'CPCM(TOLUENE)/wB97X-V/def2-TZVPP'}})
 
+        # TODO flexible parameters input from ppinp
+        orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
+                                                              {"to_pinn": None,
+                                                               "level_of_theory": 'CPCM(TOLUENE)/r2scan-3c'}})
+        print()
     elif args.pptype == "optts analysis":
         orca5_objs = Orca5Processor(args.root,
                                     post_process_type={"optts analysis": spec},
