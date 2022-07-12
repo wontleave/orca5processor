@@ -361,6 +361,7 @@ class Orca5Processor:
                 thermo_corr_sp = {}
                 corr = 0.0
                 # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
+
                 labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
                 for item in ref_objs[key][0].labelled_data:
                     if item == "N Img Freq" or item == "Negative Freqs":
@@ -371,9 +372,20 @@ class Orca5Processor:
                             try:
                                 corr += ref_objs[key][0].labelled_data[item]
                                 corr_value = obj_.labelled_data[sp_key] + corr
-                                thermo_corr_sp[f"{thermo_corr_type} -- {sp_key}//{opt_theory}"] = corr_value
+                                if thermo_corr_type.upper() == "ZPE":
+                                    _label = "ZPE_corrected elec_energy"
+                                elif thermo_corr_type.upper() == "THERMAL":
+                                    _label = "total_thermal_energy"
+                                elif thermo_corr_type.upper() == "THERMAL_ENTHALPY_CORR":
+                                    _label = "total_enthalpy"
+                                elif thermo_corr_type.upper() == "FINAL_ENTROPY_TERM":
+                                    _label = "final_gibbs_free_energy"
+
+                                thermo_corr_sp[f"{_label} -- {sp_key}//{opt_theory}"] = corr_value
+
                             except TypeError:
                                 raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
+
                 labeled_data[key_from_base] = {**labeled_data[key_from_base], **thermo_corr_sp}
             if counter == 0:
                 row_labels = list(labeled_data[key_from_base].keys())
@@ -390,6 +402,30 @@ class Orca5Processor:
 
         combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
         suffix = path.basename(self.root_folder_path)
+
+        # Filter unwanted rows by query
+        expr = 'index != "N Img Freq" and index != "Negative Freqs"'
+        expr += 'and not index.str.contains("--ZPE")'
+        expr += 'and not index.str.contains("--thermal")'
+        expr += 'and not index.str.contains("--thermal_enthalpy_corr")'
+        expr += 'and not index.str.contains("--final_entropy_term")'
+
+        combined_df["min"] = combined_df.query(expr).min(axis=1)
+
+        # Calculate the relative energy relative to the lowest
+        rel_en = None
+        col_names = []
+        for column in combined_df:
+            if column != "min":
+                col_names.append(column)
+                if rel_en is None:
+                    rel_en = (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509
+                else:
+                    rel_en = pd.concat([rel_en,
+                                        (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509],
+                                       axis=1)
+        rel_en.set_axis(col_names, axis=1, inplace=True)
+        combined_df = pd.concat([combined_df, rel_en])
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
 
     def process_optts(self, int_coords_from_spec):
@@ -510,8 +546,7 @@ if __name__ == "__main__":
         # We will not get individual optimization step for a stationary post-processing
         if "get_opt_step" in spec:
             if spec["get_opt_step"].lower() == "yes":
-                spec["get_opt_step"] = "yes"
-            else:
+                print(f"get_opt_step was set to yes ... disabling it ...")
                 spec["get_opt_step"] = "no"
 
         if "warning" in spec:
@@ -521,12 +556,13 @@ if __name__ == "__main__":
             else:
                 warning_path = spec["warning"][0]
 
-        orca5_ojbs = Orca5Processor(args.root,
+        orca5_objs = Orca5Processor(args.root,
                                     display_warning=True,
                                     post_process_type={"stationary": spec},
                                     delete_incomplete_job=True,
                                     warning_txt_file=warning_path,
                                     singularity_scratch=singularity_scratch)
+
     elif args.pptype == "single point":
         # orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
         #                                                       {"to_pinn": ["pickle", "energy"],
