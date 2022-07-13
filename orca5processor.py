@@ -462,10 +462,11 @@ class Orca5Processor:
                 filter_cut_off = filter_and_copy["cut_off"]
                 sliced = combined_df.loc[filter_and_copy["level_of_theory"]].iloc[1]
                 req_folder_names = sliced[sliced < filter_cut_off].index.values
-                print(f"{req_folder_names} are within the required cut-off values of {filter_cut_off} kcal/mol")
+                print(f"{len(req_folder_names)} are within the required cut-off values of {filter_cut_off} kcal/mol")
+                print(req_folder_names)
                 filtered_path = path.join(self.root_folder_path, "FILTERED")
                 assert not Path(filtered_path).is_dir(), f"Sorry {filtered_path} already exists ... please check"
-                filtered_path_obj = Path(filtered_path).mkdir()
+                Path(filtered_path).mkdir()
 
                 for key in ref_objs:
                     name = path.basename(key)
