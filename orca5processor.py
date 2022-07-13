@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import time
-import json
+import yaml
 import pickle
 import argparse
 import shutil
@@ -15,6 +15,7 @@ from os import listdir, path
 from pathlib import Path
 from geo_optimization import Action, analyze_ts
 from copy import copy
+
 """
 Each valid Orca 5 output is converted into an Orca5 object
 Version 1.0.0 -- 20210706 -- Focus on reading single point calculations for PiNN training
@@ -67,7 +68,7 @@ class Orca5Processor:
 
         for key in post_process_type:
             if "grad_cut_off" in post_process_type[key]:
-                grad_cut_off = float(post_process_type[key]["grad_cut_off"][0])  # value is a list.
+                grad_cut_off = post_process_type[key]["grad_cut_off"]
             else:
                 grad_cut_off = 1e-5
 
@@ -112,12 +113,23 @@ class Orca5Processor:
 
         for key in post_process_type:
             if "temperature" in post_process_type[key]:
-                temperature_ = float(post_process_type[key]["temperature"][0])
+                temperature_ = post_process_type[key]["temperature"]
             else:
                 temperature_ = 298.15
 
+            if "calc_relative_en" in post_process_type[key]:
+                calc_relative_en = post_process_type[key]["calc_relative_en"]
+            else:
+                calc_relative_en = False
+
+            if "filter_and_copy" in post_process_type[key]:
+                filter_and_copy = post_process_type[key]["filter_and_copy"]
+            else:
+                filter_and_copy = None
+
             if key.lower() == "stationary":
-                self.process_stationary_pts(temperature_, grad_cut_off=grad_cut_off)
+                self.process_stationary_pts(temperature_, grad_cut_off=grad_cut_off, calc_relative_en=calc_relative_en,
+                                            filter_and_copy=filter_and_copy)
             elif key.lower() == "single point":
                 if "to_pinn" in post_process_type[key]:
                     to_pinn = post_process_type[key]["to_pinn"]
@@ -151,6 +163,7 @@ class Orca5Processor:
     @staticmethod
     def parse_pp_inp(path_to_pp_inp):
         """
+        Parse the yaml configuration file
 
         :param path_to_pp_inp:
         :type path_to_pp_inp: str
@@ -158,21 +171,23 @@ class Orca5Processor:
         :rtype: Dict[str, List[str]]
         """
         with open(path_to_pp_inp) as f:
-            lines = f.readlines()
+            specifications = yaml.safe_load(f)
 
-        specifications = {}
-        for line in lines:
-            try:
-                key, values = line.split("=")
-            except ValueError:
-                raise ValueError(f"{line} is in a readable format: key = x y z")
-            values = values.split()
+        # for key, value in specifications:
 
-            if key.strip().lower() == "ts_atoms":  # TODO this is no longer in use?
-                values = [int(item) for item in values]
-            else:
-                values = [item.strip() for item in values]
-            specifications[key.strip()] = values.copy()
+        # specifications = {}
+        # for line in lines:
+        #     try:
+        #         key, values = line.split("=")
+        #     except ValueError:
+        #         raise ValueError(f"{line} is in a readable format: key = x y z")
+        #     values = values.split()
+        #
+        #     if key.strip().lower() == "ts_atoms":  # TODO this is no longer in use?
+        #         values = [int(item) for item in values]
+        #     else:
+        #         values = [item.strip() for item in values]
+        #     specifications[key.strip()] = values.copy()
         return specifications
 
     def display_warning(self, warning_txt_path=False):
@@ -279,13 +294,21 @@ class Orca5Processor:
             if output_type == "pickle":
                 pickle.dump(pinn_tuples, open(path.join(self.root_folder_path, "sp_objs.pickle"), "wb"))
 
-    def process_stationary_pts(self, temperature=298.15, grad_cut_off=1e-5):
+    def process_stationary_pts(self, temperature=298.15, grad_cut_off=1e-5, calc_relative_en=False,
+                               filter_and_copy=None):
         """
         TODO Streamline gradient check?
         :param temperature:
         :type temperature: float
         :param grad_cut_off:
         :type grad_cut_off: float
+        :param calc_relative_en: Flag to control whether the relative energy
+                                of each struct is calculated relative to the minimum
+        :type: calc_relative_en: bool
+        :param filter_and_copy: Control whether to select those structures that is less than the given cut-off and
+                                copy them to a new folder. Can only be triggered if calc_relative_en is True.
+                                It contains the level of theory used for filtering the dataframe and the cut-off
+        :type filter_and_copy: Dict[str, float]
         :return:
         :rtype:
         """
@@ -402,31 +425,58 @@ class Orca5Processor:
 
         combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
         suffix = path.basename(self.root_folder_path)
+        has_relative_en = False
+        if calc_relative_en:
+            # Filter unwanted rows by query
+            expr = 'index != "N Img Freq" and index != "Negative Freqs"'
+            expr += 'and not index.str.contains("--ZPE")'
+            expr += 'and not index.str.contains("--thermal")'
+            expr += 'and not index.str.contains("--thermal_enthalpy_corr")'
+            expr += 'and not index.str.contains("--final_entropy_term")'
 
-        # Filter unwanted rows by query
-        expr = 'index != "N Img Freq" and index != "Negative Freqs"'
-        expr += 'and not index.str.contains("--ZPE")'
-        expr += 'and not index.str.contains("--thermal")'
-        expr += 'and not index.str.contains("--thermal_enthalpy_corr")'
-        expr += 'and not index.str.contains("--final_entropy_term")'
+            combined_df["min"] = combined_df.query(expr).min(axis=1)
 
-        combined_df["min"] = combined_df.query(expr).min(axis=1)
+            # Calculate the relative energy relative to the lowest
+            rel_en = None
+            col_names = []
+            for column in combined_df:
+                if column != "min":
+                    col_names.append(column)
+                    if rel_en is None:
+                        rel_en = (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509
+                    else:
+                        rel_en = pd.concat([rel_en,
+                                            (combined_df.query(expr)[column] - combined_df.query(expr)[
+                                                "min"]) * 627.509],
+                                           axis=1)
+            rel_en.set_axis(col_names, axis=1, inplace=True)
+            combined_df = pd.concat([combined_df, rel_en])
+            has_relative_en = True
 
-        # Calculate the relative energy relative to the lowest
-        rel_en = None
-        col_names = []
-        for column in combined_df:
-            if column != "min":
-                col_names.append(column)
-                if rel_en is None:
-                    rel_en = (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509
-                else:
-                    rel_en = pd.concat([rel_en,
-                                        (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509],
-                                       axis=1)
-        rel_en.set_axis(col_names, axis=1, inplace=True)
-        combined_df = pd.concat([combined_df, rel_en])
         combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
+        if filter_and_copy:
+            if not has_relative_en:
+                print("Filter_and_copy requested, but ... please calculate relative energies first ...")
+            else:
+                # Duplicates will exist. Idx 0: absolute energies Idx 1: relative energies
+                filter_cut_off = filter_and_copy["cut_off"]
+                sliced = combined_df.loc[filter_and_copy["level_of_theory"]].iloc[1]
+                req_folder_names = sliced[sliced < filter_cut_off].index.values
+                print(f"{req_folder_names} are within the required cut-off values of {filter_cut_off} kcal/mol")
+                filtered_path = path.join(self.root_folder_path, "FILTERED")
+                assert not Path(filtered_path).is_dir(), f"Sorry {filtered_path} already exists ... please check"
+                filtered_path_obj = Path(filtered_path).mkdir()
+
+                for key in ref_objs:
+                    name = path.basename(key)
+                    if name in req_folder_names:
+                        filtered_obj_path = path.join(filtered_path, name)
+                        filtered_obj_path_obj = Path(filtered_obj_path)
+                        filtered_obj_path_obj.mkdir()
+                        xyz_full_path = filtered_obj_path_obj / "structure.xyz"
+                        print(f"Writing {xyz_full_path}", end=" --- ")
+                        ref_objs[key][0].geo_from_xyz.write(xyz_full_path.resolve())
+                        print("DONE!")
 
     def process_optts(self, int_coords_from_spec):
         """
@@ -464,7 +514,6 @@ class Orca5Processor:
                                                      input_spec["xyz_path"]  # linux only
                         modify_orca_input(full_input_path, **input_spec)
 
-        print()
         for idx, key in enumerate(converged_ts_objs):
             if idx == 0:
                 converged_root = Path(self.root_folder.joinpath("CONVERGED"))
@@ -508,13 +557,13 @@ class Orca5Processor:
             freq_.final_gibbs_free_energy = freq_.total_enthalpy + freq_.final_entropy_term
 
             freq_.thermo_data[temperature] = {"zero point energy": freq_.zero_pt_energy,
-                                        "total thermal correction": freq_.total_thermal_correction,
-                                        "thermal Enthalpy correction": freq_.thermal_enthalpy_correction,
-                                        "total entropy correction": freq_.final_entropy_term,
-                                        "zero point corrected energy": zpe_corr_energy,
-                                        "total thermal energy": freq_.total_thermal_energy,
-                                        "total enthalpy": freq_.total_enthalpy,
-                                        "final gibbs free energy": freq_.final_gibbs_free_energy}
+                                              "total thermal correction": freq_.total_thermal_correction,
+                                              "thermal Enthalpy correction": freq_.thermal_enthalpy_correction,
+                                              "total entropy correction": freq_.final_entropy_term,
+                                              "zero point corrected energy": zpe_corr_energy,
+                                              "total thermal energy": freq_.total_thermal_energy,
+                                              "total enthalpy": freq_.total_enthalpy,
+                                              "final gibbs free energy": freq_.final_gibbs_free_energy}
 
             ref_obj.freqs[temperature] = freq_
 
@@ -529,7 +578,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.ppinp is None:
-        ppinp_path = path.join(args.root, "ppinp.txt")
+        ppinp_path = path.join(args.root, "ppinp.yaml")
         temp_ = Path(ppinp_path)
         assert temp_.is_file(), f"{temp_.resolve()} is not a valid file or doesn't exist!"
     else:
@@ -570,8 +619,8 @@ if __name__ == "__main__":
 
         # TODO flexible parameters input from ppinp
         orca5_objs = Orca5Processor(args.root, post_process_type={"single point":
-                                                              {"to_pinn": None,
-                                                               "level_of_theory": 'CPCM(TOLUENE)/r2scan-3c'}})
+                                                                      {"to_pinn": None,
+                                                                       "level_of_theory": 'CPCM(TOLUENE)/r2scan-3c'}})
         print()
     elif args.pptype == "optts analysis":
         orca5_objs = Orca5Processor(args.root,
