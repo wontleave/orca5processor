@@ -309,7 +309,10 @@ if __name__ == "__main__":
     mol = Atoms(atoms, positions=coords3d)
     fc_J_m_2, proj_freq_cm_1, proj_eigvec = vib_analysis(mass, cartesian_hessian, coords3d)
 
-    fc_J_m_2 = fc_J_m_2.astype(float)
+    fc_J_m_2 = np.real(fc_J_m_2)
+    proj_freq_cm_1 = np.real(proj_freq_cm_1)
+    proj_eigvec = np.real(proj_eigvec)
+
     displaced_xyz, total_velocities_plus, total_velocities_minus = reactive_normal_mode_sampling(coords3d, fc_J_m_2,
                                                                                                  proj_freq_cm_1,
                                                                                                  proj_eigvec,

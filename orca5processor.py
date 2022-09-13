@@ -318,7 +318,8 @@ class Orca5Processor:
 
         # After merge_thermo, all the printthermo obj will be removed
         # self.merge_thermo(temperature=temperature, grad_cut_off=grad_cut_off)
-
+        cannot_proceed = False
+        unacceptable_references = {}
         for key in self.folders_to_orca5:
             ref_objs[key] = []
             print_thermo_objs[key] = []
@@ -352,132 +353,141 @@ class Orca5Processor:
                                 ref_objs[key].append(obj)
                                 obj.job_type_objs["FREQ"].negligible_gradient = True
 
-            assert len(ref_objs[key]) == 1, f"{key} has {len(ref_objs[key])}. Please check the folder! Terminating"
+            if len(ref_objs[key]) != 1:
+                cannot_proceed = True
+                unacceptable_references[key] = len(ref_objs[key])
+
             # Merge the printthermo job to ref_obj
-            if len(print_thermo_objs[key]) > 0:
+            if len(print_thermo_objs[key]) > 0 and not cannot_proceed:
                 Orca5Processor.merge_thermo(print_thermo_objs[key], ref_objs[key][0])
 
-        for key in self.folders_to_orca5:
-            self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
+        if not cannot_proceed:
+            for key in self.folders_to_orca5:
+                self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
 
-        # All SP structures must be consistent with the structure in the reference obj
-        sp_objs: Dict[str, List[Orca5]] = {}
-        for key in self.folders_to_orca5:
-            sp_objs[key] = []
-            temp_obj_lists_ = self.folders_to_orca5[key]
-            for obj in temp_obj_lists_:
-                if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
-                    # TODO We will assume that this is a SP for now
-                    rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                    if rmsd_ < grad_cut_off:
-                        sp_objs[key].append(obj)
+            # All SP structures must be consistent with the structure in the reference obj
+            sp_objs: Dict[str, List[Orca5]] = {}
+            for key in self.folders_to_orca5:
+                sp_objs[key] = []
+                temp_obj_lists_ = self.folders_to_orca5[key]
+                for obj in temp_obj_lists_:
+                    if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
+                        # TODO We will assume that this is a SP for now
+                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                        if rmsd_ < grad_cut_off:
+                            sp_objs[key].append(obj)
 
-        # Collect the self.labelled_data and make the pandas df
-        labeled_data: Dict[str, Dict[str, str]] = {}
-        row_labels = []
-        counter = 0
-        thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
-        for key in ref_objs:
-            key_from_base = path.basename(key)
-            labeled_data[key_from_base] = ref_objs[key][0].labelled_data
-            for obj_ in sp_objs[key]:
-                thermo_corr_sp = {}
-                corr = 0.0
-                # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
+            # Collect the self.labelled_data and make the pandas df
+            labeled_data: Dict[str, Dict[str, str]] = {}
+            row_labels = []
+            counter = 0
+            thermo_corr_labels = np.array(["ZPE", "thermal", "thermal_enthalpy_corr", "final_entropy_term"])
+            for key in ref_objs:
+                key_from_base = path.basename(key)
+                labeled_data[key_from_base] = ref_objs[key][0].labelled_data
+                for obj_ in sp_objs[key]:
+                    thermo_corr_sp = {}
+                    corr = 0.0
+                    # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
 
-                labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
-                for item in ref_objs[key][0].labelled_data:
-                    if item == "N Img Freq" or item == "Negative Freqs":
-                        continue
-                    opt_theory, thermo_corr_type = item.split("--")
-                    if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
-                        for sp_key in obj_.labelled_data:
-                            try:
-                                corr += ref_objs[key][0].labelled_data[item]
-                                corr_value = obj_.labelled_data[sp_key] + corr
-                                if thermo_corr_type.upper() == "ZPE":
-                                    _label = "ZPE_corrected elec_energy"
-                                elif thermo_corr_type.upper() == "THERMAL":
-                                    _label = "total_thermal_energy"
-                                elif thermo_corr_type.upper() == "THERMAL_ENTHALPY_CORR":
-                                    _label = "total_enthalpy"
-                                elif thermo_corr_type.upper() == "FINAL_ENTROPY_TERM":
-                                    _label = "final_gibbs_free_energy"
+                    labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
+                    for item in ref_objs[key][0].labelled_data:
+                        if item == "N Img Freq" or item == "Negative Freqs":
+                            continue
+                        opt_theory, thermo_corr_type = item.split("--")
+                        if np.any(np.char.equal(thermo_corr_type, thermo_corr_labels)):
+                            for sp_key in obj_.labelled_data:
+                                try:
+                                    corr += ref_objs[key][0].labelled_data[item]
+                                    corr_value = obj_.labelled_data[sp_key] + corr
+                                    if thermo_corr_type.upper() == "ZPE":
+                                        _label = "ZPE_corrected elec_energy"
+                                    elif thermo_corr_type.upper() == "THERMAL":
+                                        _label = "total_thermal_energy"
+                                    elif thermo_corr_type.upper() == "THERMAL_ENTHALPY_CORR":
+                                        _label = "total_enthalpy"
+                                    elif thermo_corr_type.upper() == "FINAL_ENTROPY_TERM":
+                                        _label = "final_gibbs_free_energy"
 
-                                thermo_corr_sp[f"{_label} -- {sp_key}//{opt_theory}"] = corr_value
+                                    thermo_corr_sp[f"{_label} -- {sp_key}//{opt_theory}"] = corr_value
 
-                            except TypeError:
-                                raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
+                                except TypeError:
+                                    raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
 
-                labeled_data[key_from_base] = {**labeled_data[key_from_base], **thermo_corr_sp}
-            if counter == 0:
-                row_labels = list(labeled_data[key_from_base].keys())
-                counter += 1
-            # else:
-            ## For DEBUG only
-            #     temp_labels = list(labeled_data[key_from_base].keys())
-            #     for idx, label in enumerate(temp_labels):
-            #         if row_labels[idx] == label:
-            #             same_label = True
-            #         else:
-            #             same_label = False
-            #         print(f"{idx=} {row_labels[idx]} vs. {label} -- {same_label}")
+                    labeled_data[key_from_base] = {**labeled_data[key_from_base], **thermo_corr_sp}
+                if counter == 0:
+                    row_labels = list(labeled_data[key_from_base].keys())
+                    counter += 1
+                # else:
+                ## For DEBUG only
+                #     temp_labels = list(labeled_data[key_from_base].keys())
+                #     for idx, label in enumerate(temp_labels):
+                #         if row_labels[idx] == label:
+                #             same_label = True
+                #         else:
+                #             same_label = False
+                #         print(f"{idx=} {row_labels[idx]} vs. {label} -- {same_label}")
 
-        combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
-        suffix = path.basename(self.root_folder_path)
-        has_relative_en = False
-        if calc_relative_en:
-            # Filter unwanted rows by query
-            expr = 'index != "N Img Freq" and index != "Negative Freqs"'
-            expr += 'and not index.str.contains("--ZPE")'
-            expr += 'and not index.str.contains("--thermal")'
-            expr += 'and not index.str.contains("--thermal_enthalpy_corr")'
-            expr += 'and not index.str.contains("--final_entropy_term")'
+            combined_df = pd.DataFrame(labeled_data).reindex(row_labels)
+            suffix = path.basename(self.root_folder_path)
+            has_relative_en = False
+            if calc_relative_en:
+                # Filter unwanted rows by query
+                expr = 'index != "N Img Freq" and index != "Negative Freqs"'
+                expr += 'and not index.str.contains("--ZPE")'
+                expr += 'and not index.str.contains("--thermal")'
+                expr += 'and not index.str.contains("--thermal_enthalpy_corr")'
+                expr += 'and not index.str.contains("--final_entropy_term")'
 
-            combined_df["min"] = combined_df.query(expr).min(axis=1)
+                combined_df["min"] = combined_df.query(expr).min(axis=1)
 
-            # Calculate the relative energy relative to the lowest
-            rel_en = None
-            col_names = []
-            for column in combined_df:
-                if column != "min":
-                    col_names.append(column)
-                    if rel_en is None:
-                        rel_en = (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509
-                    else:
-                        rel_en = pd.concat([rel_en,
-                                            (combined_df.query(expr)[column] - combined_df.query(expr)[
-                                                "min"]) * 627.509],
-                                           axis=1)
-            rel_en.set_axis(col_names, axis=1, inplace=True)
-            combined_df = pd.concat([combined_df, rel_en])
-            has_relative_en = True
+                # Calculate the relative energy relative to the lowest
+                rel_en = None
+                col_names = []
+                for column in combined_df:
+                    if column != "min":
+                        col_names.append(column)
+                        if rel_en is None:
+                            rel_en = (combined_df.query(expr)[column] - combined_df.query(expr)["min"]) * 627.509
+                        else:
+                            rel_en = pd.concat([rel_en,
+                                                (combined_df.query(expr)[column] - combined_df.query(expr)[
+                                                    "min"]) * 627.509],
+                                               axis=1)
+                rel_en.set_axis(col_names, axis=1, inplace=True)
+                combined_df = pd.concat([combined_df, rel_en])
+                has_relative_en = True
 
-        combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
-        if filter_and_copy:
-            if not has_relative_en:
-                print("Filter_and_copy requested, but ... please calculate relative energies first ...")
-            else:
-                # Duplicates will exist. Idx 0: absolute energies Idx 1: relative energies
-                filter_cut_off = filter_and_copy["cut_off"]
-                sliced = combined_df.loc[filter_and_copy["level_of_theory"]].iloc[1]
-                req_folder_names = sliced[sliced < filter_cut_off].index.values
-                print(f"{len(req_folder_names)} are within the required cut-off values of {filter_cut_off} kcal/mol")
-                print(req_folder_names)
-                filtered_path = path.join(self.root_folder_path, "FILTERED")
-                assert not Path(filtered_path).is_dir(), f"Sorry {filtered_path} already exists ... please check"
-                Path(filtered_path).mkdir()
+            combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
+            if filter_and_copy:
+                if not has_relative_en:
+                    print("Filter_and_copy requested, but ... please calculate relative energies first ...")
+                else:
+                    # Duplicates will exist. Idx 0: absolute energies Idx 1: relative energies
+                    filter_cut_off = filter_and_copy["cut_off"]
+                    sliced = combined_df.loc[filter_and_copy["level_of_theory"]].iloc[1]
+                    req_folder_names = sliced[sliced < filter_cut_off].index.values
+                    print(f"{len(req_folder_names)} are within the required cut-off values of {filter_cut_off} kcal/mol")
+                    print(req_folder_names)
+                    filtered_path = path.join(self.root_folder_path, "FILTERED")
+                    assert not Path(filtered_path).is_dir(), f"Sorry {filtered_path} already exists ... please check"
+                    Path(filtered_path).mkdir()
 
-                for key in ref_objs:
-                    name = path.basename(key)
-                    if name in req_folder_names:
-                        filtered_obj_path = path.join(filtered_path, name)
-                        filtered_obj_path_obj = Path(filtered_obj_path)
-                        filtered_obj_path_obj.mkdir()
-                        xyz_full_path = filtered_obj_path_obj / "structure.xyz"
-                        print(f"Writing {xyz_full_path}", end=" --- ")
-                        ref_objs[key][0].geo_from_xyz.write(xyz_full_path.resolve())
-                        print("DONE!")
+                    for key in ref_objs:
+                        name = path.basename(key)
+                        if name in req_folder_names:
+                            filtered_obj_path = path.join(filtered_path, name)
+                            filtered_obj_path_obj = Path(filtered_obj_path)
+                            filtered_obj_path_obj.mkdir()
+                            xyz_full_path = filtered_obj_path_obj / "structure.xyz"
+                            print(f"Writing {xyz_full_path}", end=" --- ")
+                            ref_objs[key][0].geo_from_xyz.write(xyz_full_path.resolve())
+                            print("DONE!")
+
+        else:
+            print("Problem(s) found. The following reference(s) is/are unacceptable:")
+            for key in unacceptable_references.keys():
+                print(f"{key} -- ")
 
     def process_optts(self, int_coords_from_spec):
         """
