@@ -320,6 +320,8 @@ class Orca5Processor:
         # self.merge_thermo(temperature=temperature, grad_cut_off=grad_cut_off)
         cannot_proceed = False
         unacceptable_references = {}
+        missing_temp = {}
+
         for key in self.folders_to_orca5:
             ref_objs[key] = []
             print_thermo_objs[key] = []
@@ -361,22 +363,27 @@ class Orca5Processor:
             if len(print_thermo_objs[key]) > 0 and not cannot_proceed:
                 Orca5Processor.merge_thermo(print_thermo_objs[key], ref_objs[key][0])
 
+        for key in self.folders_to_orca5:
+            self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
+
+        # All SP structures must be consistent with the structure in the reference obj
+        sp_objs: Dict[str, List[Orca5]] = {}
+        for key in self.folders_to_orca5:
+            sp_objs[key] = []
+            temp_obj_lists_ = self.folders_to_orca5[key]
+            for obj in temp_obj_lists_:
+                if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
+                    # TODO We will assume that this is a SP for now
+                    rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                    if rmsd_ < grad_cut_off:
+                        sp_objs[key].append(obj)
+                else:
+                    for warning in obj.warnings:
+                        if "THERMOCHEMISTRY:" in warning:
+                            cannot_proceed = True
+                            missing_temp[key] = temperature
+
         if not cannot_proceed:
-            for key in self.folders_to_orca5:
-                self.orca5_to_pd(self.folders_to_orca5[key], temperature_=temperature)
-
-            # All SP structures must be consistent with the structure in the reference obj
-            sp_objs: Dict[str, List[Orca5]] = {}
-            for key in self.folders_to_orca5:
-                sp_objs[key] = []
-                temp_obj_lists_ = self.folders_to_orca5[key]
-                for obj in temp_obj_lists_:
-                    if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
-                        # TODO We will assume that this is a SP for now
-                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                        if rmsd_ < grad_cut_off:
-                            sp_objs[key].append(obj)
-
             # Collect the self.labelled_data and make the pandas df
             labeled_data: Dict[str, Dict[str, str]] = {}
             row_labels = []
@@ -485,9 +492,16 @@ class Orca5Processor:
                             print("DONE!")
 
         else:
-            print("Problem(s) found. The following reference(s) is/are unacceptable:")
-            for key in unacceptable_references.keys():
-                print(f"{key} -- ")
+
+            for idx, key in enumerate(unacceptable_references.keys()):
+                if idx == 0:
+                    print("Problem(s) found. The following reference(s) is/are unacceptable:")
+                print(f"{key} -- {unacceptable_references[key]}")
+
+            for idx, key in enumerate(missing_temp.keys()):
+                if idx == 0:
+                    print("Problem(s) found. The following calculations are missing the required temperature")
+                print(f"{key} -- {missing_temp[key]}")
 
     def process_optts(self, int_coords_from_spec):
         """

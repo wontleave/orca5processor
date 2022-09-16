@@ -471,8 +471,10 @@ class Orca5:
                 else:
                     temp_ = self.job_type_objs["FREQ"].thermo_data
                     raise ValueError(f"We cannot find {temperature} in {temp_}")
+        else:
+            self.warnings.append(f"THERMOCHEMISTRY: {temperature} cannot be found!")
 
-        elif "SP" in self.job_type_objs.keys():
+        if "SP" in self.job_type_objs.keys():
             if "OPT" not in self.job_type_objs.keys() and "FREQ" not in self.job_type_objs.keys():
                 single_point[self.level_of_theory] = self.job_type_objs["SP"].final_sp_energy
                 self.labelled_data = {**self.labelled_data, **single_point}
