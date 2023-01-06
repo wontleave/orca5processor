@@ -325,7 +325,6 @@ class Orca5Processor:
         for key in self.folders_to_orca5:
             ref_objs[key] = []
             print_thermo_objs[key] = []
-            no_of_opt = 0
             temp_obj_lists_ = self.folders_to_orca5[key]
             for obj in temp_obj_lists_:
                 if obj.method.is_print_thermo:
@@ -335,7 +334,7 @@ class Orca5Processor:
                         if len(ref_objs[key]) == 1:
                             # Check if the OPT object structure is the same as the current one
                             rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
-                            if rmsd_ > 1e-5:
+                            if rmsd_ > grad_cut_off:
                                 ref_objs[key].append(obj)
                         else:
                             ref_objs[key].append(obj)
@@ -344,11 +343,12 @@ class Orca5Processor:
                         if obj.job_type_objs["FREQ"].negligible_gradient:
                             ref_objs[key].append(obj)
                         else:
-                            loosen_cut_off = grad_cut_off * 2.0
+                            loosen_cut_off = grad_cut_off * 4.0
                             diff_wrt_ref = loosen_cut_off - obj.job_type_objs["SP"].gradients
                             if np.any(diff_wrt_ref < 0.0):
                                 max_grad = np.max(obj.job_type_objs["SP"].gradients)
                                 print(f"Max gradient is above loosen cut-off={loosen_cut_off:.5E}: {max_grad}")
+                                # TODO Considered as failed?
                             else:
                                 print(f"Loosen cut-off from {grad_cut_off:.2E} to {loosen_cut_off:.2E}"
                                       f" - successful - Adding {obj.input_name}")
@@ -374,12 +374,18 @@ class Orca5Processor:
             for obj in temp_obj_lists_:
                 if "OPT" not in obj.job_type_objs and "FREQ" not in obj.job_type_objs:
                     # TODO We will assume that this is a SP for now
-                    rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                    try:
+                        rmsd_ = calc_rmsd_ase_atoms_non_pbs(ref_objs[key][0].geo_from_xyz, obj.geo_from_xyz)
+                    except IndexError:
+                        if cannot_proceed:
+                            continue
+                        else:
+                            raise IndexError(f"{key=}")
                     if rmsd_ < grad_cut_off:
                         sp_objs[key].append(obj)
                 else:
                     for warning in obj.warnings:
-                        if "THERMOCHEMISTRY:" in warning:
+                        if "THERMOCHEMISTRY:" in warning and "OPT" not in obj.job_type_objs:
                             cannot_proceed = True
                             missing_temp[key] = temperature
 

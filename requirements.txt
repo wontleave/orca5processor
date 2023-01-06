@@ -1,7 +1,9 @@
-setuptools~=62.0.0
+setuptools
 numpy~=1.22.3
 pandas~=1.4.2
 networkx~=2.7.1
 ase~=3.22.1
 rmsd~=1.4
 openpyxl~=3.0.9
+pyyaml
+matplotlib

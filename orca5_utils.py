@@ -105,6 +105,9 @@ class Orca5:
                     if from_root.is_file():
                         self.geo_from_xyz = read(from_root.resolve())
                         found_xyzfile = True
+                    else:
+                        print(f"FATAL WARNING, this single point job's geometry cannot be found! {temp_path}")
+
                 assert found_xyzfile, f"Sorry, we can't find {temp_path} or {from_root.resolve()}"
 
             # compare the geometry from output and from xyzfile if necessary
@@ -114,7 +117,7 @@ class Orca5:
                     not allow_incomplete:
                 # TODO check the QM atoms with the corresponding atom in the xyzfile
                 rmsd_ = calc_rmsd_ase_atoms_non_pbs(self.geo_from_xyz, self.geo_from_output)
-                if rmsd_ > 1e-5:
+                if rmsd_ > grad_cut_off:
                     self.warnings.append(f"Difference between geometry from output and xyzfile. RMSD = {rmsd_}")
         else:
             self.warnings.append("INCOMPLETE ORCA5 job detect!")
@@ -261,9 +264,22 @@ class Orca5:
         if "cpcm" in self.keywords and "CPCM" not in self.job_types:
             self.job_types.append("CPCM")
 
+        # Check if this is a compound jobs - Extrapolation to CBS
+        is_compound_sp = False
+        for item in compound_keywords:
+            if item.upper() in self.keywords["simple"]:
+                is_compound_sp = True
+
+        if is_compound_sp:
+            if "3/4" in self.keywords["simple"]:
+                self.job_types.append("SP")
+                # TODO: Orca Class cannot be extended to more than one jobtype, therefore not all the SP of extrapolate
+                # can be parsed
+
         # Check if it is a single point
         if len(self.job_types) == 0:
             is_single_point = False
+
             for item in dft_simple_keywords:
                 if item.upper() in self.keywords["simple"]:
                     is_single_point = True
@@ -310,10 +326,17 @@ class Orca5:
                 if kw.upper() in self.keywords["simple"]:
                     self.job_type_objs["SP"].keywords["convergence"] = kw
 
-            for kw in dft_simple_keywords:
-                if kw.upper() in self.keywords["simple"]:
-                    self.method.keywords["functional"] = kw
-                    self.method.keywords["method"] = "dft"
+            self.method.keywords["theory"] = None
+            if is_compound_sp:  # Can only be DLPNO-CCSD(T) now
+                self.method.keywords["method"] = "wavefunction"
+                for kw in wavefunc_keywords:
+                    if kw.upper() in self.keywords["simple"]:
+                        self.method.keywords["theory"] = kw
+            else:
+                for kw in dft_simple_keywords:
+                    if kw.upper() in self.keywords["simple"]:
+                        self.method.keywords["functional"] = kw
+                        self.method.keywords["method"] = "dft"
 
             # Other job types are specified here
             for item in self.job_types:
@@ -403,6 +426,8 @@ class Orca5:
             if self.method.keywords["correlation"] is not None:
                 level_of_theory += self.method.keywords["correlation"].split("_")[-1]
                 has_dft_correlation = True
+            if self.method.keywords["theory"] is not None:
+                level_of_theory += self.method.keywords["theory"]
 
             if has_dft_exchange and has_dft_correlation and "mp2" in self.keywords:
                 # Some custom double-hybrid functional
@@ -493,12 +518,15 @@ runtypes_simple_keywords = ("ENERGY", "SP", "OPT", "ZOPT", "COPT", "GDIIS-COPT",
 
 general_keywords = ("HF", "DFT", "FOD")
 
+compound_keywords = ["ExtrapolateEP2"]
+
 # ORCA5 DFT functional
 dft_simple_keywords = ("PBEh-3c", "r2scan-3c", "B97-3c",
                        "B3LYP", "M06-2X", "wB97X-V", "wB97X-D4", "wB97M-V", "wB97M-D4")
 
-qmmm_simple_keywords = ("QM/XTB")
+qmmm_simple_keywords = ["QM/XTB"]
 
+wavefunc_keywords = ("DLPNO-CCSD(T)", "MP2")
 # ORCA5 basis sets keywords
 basis_set_keywords = {"basis_set_keywords": ("def2-SVP", "def2-SV(P)", "def2-TZVP", "def2-TZVP(-f)",
                                              "def2-TZVPP", "def2-QZVP", "def2-QZVPP"),
@@ -576,7 +604,8 @@ class Basis:
         for kw in basis_set_keywords["basis_set_keywords"]:
             if kw.upper() in simple_kw:
                 self.keywords["basis"] = kw
-
+            elif "ExtrapolateEP2".upper() in simple_kw and "def2".upper() in simple_kw:
+                self.keywords["basis"] = "CBS:def2"
         # Auxillary basis
         is_autoaux = False
         for kw in basis_set_keywords["aux_general_keywords"]:
@@ -1213,7 +1242,7 @@ class Scf:
                         elements_seq += element
                         coordinates.append([float(x), float(y), float(z)])
                     except ValueError:
-                        start_geometry_from_single_point = 0
+                        start_geometry_from_single_point = 3
                         self.geo_from_output = Atoms(elements_seq, positions=np.array(coordinates))
                         continue
 
@@ -1488,9 +1517,22 @@ def get_orca5_keywords(lines_):
                 coord_path = None
             idx_to_exclude = [idx + 1, idx + 2, idx + 3, idx + 4]
 
-    # Change all simple keywords to lowercase
+    # Change all simple keywords to uppercase
     keywords["simple"] = [item.upper() for item in keywords["simple"]]
 
+    # Split extrapolate
+    where_is_extrapolate = 0
+    extrapolate_kw = None
+    for idx, item in enumerate(keywords["simple"]):
+        if "ExtrapolateEP2".upper() in item:
+            where_is_extrapolate = idx
+            extrapolate_basis_size, extrapolate_basis_type, extra_lvl_of_theory = item.split(",")
+            extrapolate_kw, extrapolate_basis_size = extrapolate_basis_size.split("(")
+            extra_lvl_of_theory = extra_lvl_of_theory[0:-1]
+            break
+    if extrapolate_kw is not None:
+        keywords["simple"] = [item for idx, item in enumerate(keywords["simple"]) if idx != where_is_extrapolate]
+        keywords["simple"] += [extrapolate_kw, extrapolate_basis_size, extrapolate_basis_type, extra_lvl_of_theory]
     # basename accounts for the relative path used in Singularity container
     return keywords, {"coord_type": coord_type, "coord_path": path.basename(coord_path),
                       "multiplicity": multiplicity, "charge": charge}, path.basename(name)
