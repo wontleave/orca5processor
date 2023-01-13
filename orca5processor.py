@@ -127,9 +127,13 @@ class Orca5Processor:
             else:
                 filter_and_copy = None
 
+            if "boltzmann_weighted_en" in post_process_type[key]:
+                boltzmann_weighted_en = post_process_type[key]["boltzmann_weighted_en"]
+
             if key.lower() == "stationary":
                 self.process_stationary_pts(temperature_, grad_cut_off=grad_cut_off, calc_relative_en=calc_relative_en,
-                                            filter_and_copy=filter_and_copy)
+                                            filter_and_copy=filter_and_copy,
+                                            boltzmann_weighted_en=boltzmann_weighted_en)
             elif key.lower() == "single point":
                 if "to_pinn" in post_process_type[key]:
                     to_pinn = post_process_type[key]["to_pinn"]
@@ -295,7 +299,7 @@ class Orca5Processor:
                 pickle.dump(pinn_tuples, open(path.join(self.root_folder_path, "sp_objs.pickle"), "wb"))
 
     def process_stationary_pts(self, temperature=298.15, grad_cut_off=1e-5, calc_relative_en=False,
-                               filter_and_copy=None):
+                               boltzmann_weighted_en=False, filter_and_copy=None):
         """
         TODO Streamline gradient check?
         :param temperature:
@@ -305,6 +309,8 @@ class Orca5Processor:
         :param calc_relative_en: Flag to control whether the relative energy
                                 of each struct is calculated relative to the minimum
         :type: calc_relative_en: bool
+        :param boltzmann_weighted_en: calculate the Boltzmann-weighted energy at the given temperature
+        :type boltzmann_weighted_en: bool
         :param filter_and_copy: Control whether to select those structures that is less than the given cut-off and
                                 copy them to a new folder. Can only be triggered if calc_relative_en is True.
                                 It contains the level of theory used for filtering the dataframe and the cut-off
@@ -321,6 +327,7 @@ class Orca5Processor:
         cannot_proceed = False
         unacceptable_references = {}
         missing_temp = {}
+        gradient_too_large = {}
 
         for key in self.folders_to_orca5:
             ref_objs[key] = []
@@ -383,6 +390,9 @@ class Orca5Processor:
                             raise IndexError(f"{key=}")
                     if rmsd_ < grad_cut_off:
                         sp_objs[key].append(obj)
+                    else:
+                        cannot_proceed = True
+                        gradient_too_large[key] = rmsd_
                 else:
                     for warning in obj.warnings:
                         if "THERMOCHEMISTRY:" in warning and "OPT" not in obj.job_type_objs:
@@ -404,6 +414,7 @@ class Orca5Processor:
                     # For each SP Orca 5 object, we will add the necessary thermochemistry corr to the SP elec energy
 
                     labeled_data[key_from_base] = {**labeled_data[key_from_base], **obj_.labelled_data}
+
                     for item in ref_objs[key][0].labelled_data:
                         if item == "N Img Freq" or item == "Negative Freqs":
                             continue
@@ -428,9 +439,16 @@ class Orca5Processor:
                                     raise TypeError(f"key:{key} item:{item} sp keu:{sp_key} failed. corr={corr}")
 
                     labeled_data[key_from_base] = {**labeled_data[key_from_base], **thermo_corr_sp}
+
                 if counter == 0:
                     row_labels = list(labeled_data[key_from_base].keys())
                     counter += 1
+                elif counter > 0:
+                    row_labels_check = list(labeled_data[key_from_base].keys())
+                    # Failsafe for missing SP in some ORCA obj
+                    if len(row_labels_check) > len(row_labels):
+                        row_labels = row_labels_check.copy()
+
                 # else:
                 ## For DEBUG only
                 #     temp_labels = list(labeled_data[key_from_base].keys())
@@ -467,9 +485,26 @@ class Orca5Processor:
                                                 (combined_df.query(expr)[column] - combined_df.query(expr)[
                                                     "min"]) * 627.509],
                                                axis=1)
+
                 rel_en.set_axis(col_names, axis=1, inplace=True)
-                combined_df = pd.concat([combined_df, rel_en])
-                has_relative_en = True
+
+                if boltzmann_weighted_en:
+                    boltzmann_partition = -4184.0 * rel_en.astype(float) / (8.31446261815324 * temperature)
+                    boltzmann_partition = boltzmann_partition.apply(np.exp)
+                    total_pop = boltzmann_partition.apply(np.sum, axis=1)
+                    boltzmann_weights = boltzmann_partition.div(total_pop, axis=0)
+                    req_columns = combined_df.columns.values[0:-1]
+                    boltz_weighted_en = boltzmann_weights * combined_df.loc[boltzmann_weights.index.values, req_columns]
+                    boltz_weighted_en = boltz_weighted_en.apply(np.sum, axis=1)
+                    boltz_weighted_en.rename("Boltzmann weighted energy", inplace=True)
+                    boltzmann_df = pd.concat([boltzmann_weights, boltz_weighted_en.T], axis=1)
+                    combined_df = pd.concat([combined_df, rel_en, boltzmann_df], axis=0)
+                    has_relative_en = True
+                    has_boltzmann_weights = True
+
+                else:
+                    combined_df = pd.concat([combined_df, rel_en])
+                    has_relative_en = True
 
             combined_df.to_excel(path.join(self.root_folder_path, f"stationary_{suffix}.xlsx"))
             if filter_and_copy:
@@ -508,6 +543,11 @@ class Orca5Processor:
                 if idx == 0:
                     print("Problem(s) found. The following calculations are missing the required temperature")
                 print(f"{key} -- {missing_temp[key]}")
+
+            for idx, key in enumerate(gradient_too_large.keys()):
+                if idx == 0:
+                    print("Problem(s) found. The following SP geometry has RMSD that is larger than the reference")
+                print(f"{key} -- {gradient_too_large[key]}")
 
     def process_optts(self, int_coords_from_spec):
         """
